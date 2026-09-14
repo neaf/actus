@@ -1,0 +1,99 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+	xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/maven-v4_0_0.xsd">
+	<modelVersion>4.0.0</modelVersion>
+
+	<groupId>com.actus</groupId>
+	<artifactId>actus-push2</artifactId>
+	<packaging>jar</packaging>
+	<version>0.1.0</version>
+	<name>Actus Push 2</name>
+	<description>A focused, live-performance-only Bitwig Studio controller extension for Ableton Push 2.</description>
+
+	<licenses>
+		<license>
+			<name>LGPL-3.0-or-later</name>
+			<url>https://www.gnu.org/licenses/lgpl-3.0.txt</url>
+			<distribution>repo</distribution>
+		</license>
+	</licenses>
+
+	<developers>
+		<developer>
+			<name>Tomasz Werbicki</name>
+			<email>neaf@19feelings.com</email>
+		</developer>
+	</developers>
+
+	<properties>
+		<project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+		<maven.compiler.source>21</maven.compiler.source>
+		<maven.compiler.target>21</maven.compiler.target>
+
+		<!-- Where the built .bwextension is installed. Override with -Dbitwig.extension.directory=... -->
+		<bitwig.extension.directory>${user.home}/Documents/Bitwig Studio/Extensions</bitwig.extension.directory>
+	</properties>
+
+	<repositories>
+		<repository>
+			<id>bitwig</id>
+			<name>Bitwig Maven Repository</name>
+			<url>https://maven.bitwig.com</url>
+		</repository>
+	</repositories>
+
+	<dependencies>
+		<!-- Provided by Bitwig Studio at runtime, not bundled into the .bwextension. -->
+		<dependency>
+			<groupId>com.bitwig</groupId>
+			<artifactId>extension-api</artifactId>
+			<version>21</version>
+			<scope>provided</scope>
+		</dependency>
+	</dependencies>
+
+	<build>
+		<finalName>${project.artifactId}</finalName>
+		<plugins>
+
+			<plugin>
+				<groupId>org.apache.maven.plugins</groupId>
+				<artifactId>maven-compiler-plugin</artifactId>
+				<version>3.15.0</version>
+				<configuration>
+					<source>21</source>
+					<target>21</target>
+					<encoding>UTF-8</encoding>
+				</configuration>
+			</plugin>
+
+			<plugin>
+				<groupId>org.apache.maven.plugins</groupId>
+				<artifactId>maven-jar-plugin</artifactId>
+				<version>3.5.1</version>
+			</plugin>
+
+			<!-- Copies the built jar into the Bitwig Extensions folder as a .bwextension. -->
+			<plugin>
+				<groupId>com.coderplus.maven.plugins</groupId>
+				<artifactId>copy-rename-maven-plugin</artifactId>
+				<version>1.0.1</version>
+				<executions>
+					<execution>
+						<id>install-bwextension</id>
+						<phase>package</phase>
+						<goals>
+							<goal>copy</goal>
+						</goals>
+						<configuration>
+							<sourceFile>${project.build.directory}/${project.build.finalName}.jar</sourceFile>
+							<destinationFile>${bitwig.extension.directory}/Actus.bwextension</destinationFile>
+						</configuration>
+					</execution>
+				</executions>
+			</plugin>
+
+		</plugins>
+	</build>
+
+</project>
