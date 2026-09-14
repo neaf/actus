@@ -53,8 +53,9 @@ A/B comparison while testing.
 
 | Concern | Path |
 |---|---|
-| Extension identity, MIDI auto-detection | `src/main/java/com/actus/push2/Push2ControllerExtensionDefinition.java` |
+| Extension identity, MIDI auto-detection, USB device matcher | `src/main/java/com/actus/push2/Push2ControllerExtensionDefinition.java` |
 | Extension instance (init/exit/flush) | `src/main/java/com/actus/push2/Push2ControllerExtension.java` |
+| Push 2 screen rendering + USB frame send | `src/main/java/com/actus/push2/Push2Display.java` |
 | SPI registration (required for Bitwig to find the definition) | `src/main/resources/META-INF/services/com.bitwig.extension.ExtensionDefinition` |
 | Build config, install-path property | `pom.xml` |
 
@@ -83,13 +84,77 @@ there's no bundled source/docs, use `javap -classpath ~/.m2/repository/com/bitwi
   definition are best-guess from DrivenByMoss and **untested** — verify against
   real hardware before relying on them.
 
+### USB (screen, and later pad LEDs)
+
+Bitwig's own API (v21) has native USB support — no need for DrivenByMoss's
+JNA/purejavahidapi dependencies. Two parts:
+
+1. **Declare the device**, in `ControllerExtensionDefinition.listHardwareDevices
+   (HardwareDeviceMatcherList)`: build a `UsbDeviceMatcher` (expression string
+   `"idVendor == 0x... && idProduct == 0x..."`) wrapping `UsbInterfaceMatcher`
+   (expression `"bInterfaceNumber == 0x..."`) wrapping `UsbEndpointMatcher`
+   (`UsbTransferType.BULK`/`INTERRUPT` + endpoint address byte). This expression
+   string format was reverse-engineered from DrivenByMoss's
+   `AbstractControllerExtensionDefinition.createDeviceMatcher()` — Bitwig's own
+   jar has no docs/source, only class files (`javap` everything).
+2. **Use it**, in `ControllerExtension.init()`: `host.hardwareDevice(0)` (index
+   = position among matchers you registered) cast to `UsbDevice`, then
+   `device.iface(0).pipe(0)` (indices = position within your interface/endpoint
+   matchers) cast to `UsbOutputPipe`/`UsbInputPipe`, then
+   `pipe.write(MemoryBlock, timeoutMs)`. Buffers come from
+   `host.allocateMemoryBlock(size)` (declared on the parent `Host` interface,
+   not `ControllerHost` itself — easy to miss when grepping).
+
+Push 2's screen protocol (960x160, confirmed working via `Push2Display.java`):
+header = 16 bytes `FF CC AA 88` + 12 zero bytes, sent as one `pipe.write()`;
+then the frame = fixed 327680 bytes (`20 * 0x4000`) as a second `pipe.write()`.
+Pixels are BGR565 (not the more common RGB565 — blue in the high bits), each
+row padded to a fixed stride, and the *entire* frame buffer must be XORed
+4-bytes-at-a-time with `E7 F3 E7 FF` before sending ("signal shaping" — see
+Ableton's own spec, linked in the file). Vendor/product ID `0x2982`/`0x1967`,
+interface `0`, bulk OUT endpoint `0x01` — all from DrivenByMoss's
+`Push2ControllerDefinition`/`PushUsbDisplay`.
+
+Drawing itself uses Bitwig's own Cairo-like 2D API
+(`host.createBitmap(w, h, BitmapFormat.ARGB32)`, then `bitmap.render(gc -> ...)`
+with `GraphicsOutput` — `setColor`, `rectangle`/`fill`, `setFontSize`,
+`showText`, `getTextExtents`/`getFontExtents` for centering). No font file is
+bundled — omitting `setFontFace` falls back to a default font, which is enough
+for the current logo text. `bitmap.getMemoryBlock().createByteBuffer()` gives
+raw pixel bytes ready to encode, no stride surprises (confirmed against
+DrivenByMoss's `BitmapImpl.encode()`, which does the same thing).
+
+**Gotcha: Push 2's screen blanks a few seconds after its last frame**, and
+`ControllerExtension.flush()` is NOT a timer — since Bitwig 3.1 it only fires
+on actual DAW state changes (see DrivenByMoss's `ModelImpl.flushWorkaround()`
+comment). Fix, both halves required:
+- `flush()` calls `display.refresh()` (re-sends last rendered frame, no redraw).
+- `keepDisplayAlive()`, scheduled once from `init()` via
+  `host.scheduleTask(this::keepDisplayAlive, 100)`, calls `host.requestFlush()`
+  then reschedules itself every 100ms until `exit()` sets `running = false`.
+  `requestFlush()` just asks Bitwig to call `flush()` once, soon.
+
+**Naming:** the human-readable name passed as `UsbDeviceMatcher`'s first
+constructor arg is what shows up in Bitwig's Settings → Controllers hardware
+device list. Match DrivenByMoss's convention:
+`getHardwareVendor() + " " + getHardwareModel()` → `"Ableton Push 2"` (not an
+arbitrary label like `"Push 2 Display"` — that was a first-pass mistake,
+already fixed).
+
 ## Current state (update this section as the project grows)
 
-Skeleton only: extension registers, MIDI in/out ports 0 are opened, a popup
-notification fires on load/unload. No pads, encoders, display, or USB
-(HID) handling yet — Push 2's screen and RGB pad LEDs go over USB, not MIDI,
-and DrivenByMoss's `UsbMatcher`/display code is the reference for that when we
-get there.
+- Extension registers, MIDI in/out ports 0 are opened, a popup notification
+  fires on load/unload.
+- Push 2's screen shows "Actus" centered, drawn once on `init()`
+  (`Push2Display.showText`) and kept alive by re-sending the same frame on
+  every `flush()` (`Push2Display.refresh()` — see the USB section above for
+  why this is required). USB claim is wrapped in a try/catch in
+  `Push2ControllerExtension.init()` so a missing/disconnected Push 2 logs via
+  `host.errorln()` instead of breaking the rest of init (MIDI still works).
+- Not yet done: pads (RGB LEDs, also USB — different endpoint, likely similar
+  matcher pattern), encoders, buttons, any actual session/mix behavior. The
+  display is currently static — no redraw-on-change wiring yet, since there's
+  nothing dynamic to show.
 
 ## Maintenance note
 
