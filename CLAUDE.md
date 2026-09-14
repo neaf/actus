@@ -54,8 +54,13 @@ A/B comparison while testing.
 | Concern | Path |
 |---|---|
 | Extension identity, MIDI auto-detection, USB device matcher | `src/main/java/com/actus/push2/Push2ControllerExtensionDefinition.java` |
-| Extension instance (init/exit/flush) | `src/main/java/com/actus/push2/Push2ControllerExtension.java` |
+| Extension instance, central MIDI dispatch (init/exit/flush) | `src/main/java/com/actus/push2/Push2ControllerExtension.java` |
 | Push 2 screen rendering + USB frame send | `src/main/java/com/actus/push2/Push2Display.java` |
+| Bottom pad row = clip launcher for the active scene | `src/main/java/com/actus/push2/Push2ClipLaunchRow.java` |
+| Scene Launch + Up/Down buttons (own the active-scene state) | `src/main/java/com/actus/push2/Push2SceneButtons.java` |
+| Push 2's 128-color palette + nearest-color matching | `src/main/java/com/actus/push2/Push2Colors.java` |
+| Writes the color palette to the device via SysEx on init | `src/main/java/com/actus/push2/Push2Palette.java` |
+| Global pad LED brightness (top-left encoder) | `src/main/java/com/actus/push2/Push2Brightness.java` |
 | SPI registration (required for Bitwig to find the definition) | `src/main/resources/META-INF/services/com.bitwig.extension.ExtensionDefinition` |
 | Build config, install-path property | `pom.xml` |
 
@@ -78,11 +83,26 @@ there's no bundled source/docs, use `javap -classpath ~/.m2/repository/com/bitwi
 - `AutoDetectionMidiPortNamesList.add(String[] inputNames, String[] outputNames)`
   registers one candidate port-name pairing per call.
 - `ControllerHost.println(String)` / `showPopupNotification(String)` for
-  logging/user feedback during development.
+  logging/user feedback during development. Console output only appears in
+  Bitwig's Controller Script Console (Settings → Controllers → select Actus),
+  not any file on disk.
 - Push 2 MIDI port name on macOS: `"Ableton Push 2 Live Port"` (confirmed via
   DrivenByMoss's `Push2ControllerDefinition.java`). Windows/Linux names in our
   definition are best-guess from DrivenByMoss and **untested** — verify against
   real hardware before relying on them.
+
+### Gotcha: Bitwig's Value objects are lazy — `.get()` throws unless marked interested
+
+Any `Value<T>` (e.g. `IntegerValue`, `BooleanValue`) throws on `.get()` if
+never subscribed to: *"Either call markInterested() or add at least one
+observer in init..."* (`ValueProxy.checkCanGet`). An observer
+(`addValueObserver(...)`) satisfies this automatically; for a value you only
+ever read on-demand (no callback needed), call `.markInterested()` on it once
+during `init()` instead. **Rule: any Bitwig `Value` you plan to `.get()`
+synchronously — not just ones you observe — must be marked interested (or
+observed) during `init()`, full stop.** (`Push2SceneButtons` marks interest
+on all 128 scenes' `clipCount()` for exactly this reason — its
+`findInitialScene()` reads them synchronously.)
 
 ### USB (screen, and later pad LEDs)
 
@@ -93,17 +113,14 @@ JNA/purejavahidapi dependencies. Two parts:
    (HardwareDeviceMatcherList)`: build a `UsbDeviceMatcher` (expression string
    `"idVendor == 0x... && idProduct == 0x..."`) wrapping `UsbInterfaceMatcher`
    (expression `"bInterfaceNumber == 0x..."`) wrapping `UsbEndpointMatcher`
-   (`UsbTransferType.BULK`/`INTERRUPT` + endpoint address byte). This expression
-   string format was reverse-engineered from DrivenByMoss's
-   `AbstractControllerExtensionDefinition.createDeviceMatcher()` — Bitwig's own
-   jar has no docs/source, only class files (`javap` everything).
+   (`UsbTransferType.BULK`/`INTERRUPT` + endpoint address byte).
 2. **Use it**, in `ControllerExtension.init()`: `host.hardwareDevice(0)` (index
    = position among matchers you registered) cast to `UsbDevice`, then
    `device.iface(0).pipe(0)` (indices = position within your interface/endpoint
    matchers) cast to `UsbOutputPipe`/`UsbInputPipe`, then
    `pipe.write(MemoryBlock, timeoutMs)`. Buffers come from
    `host.allocateMemoryBlock(size)` (declared on the parent `Host` interface,
-   not `ControllerHost` itself — easy to miss when grepping).
+   not `ControllerHost` itself).
 
 Push 2's screen protocol (960x160, confirmed working via `Push2Display.java`):
 header = 16 bytes `FF CC AA 88` + 12 zero bytes, sent as one `pipe.write()`;
@@ -112,22 +129,19 @@ Pixels are BGR565 (not the more common RGB565 — blue in the high bits), each
 row padded to a fixed stride, and the *entire* frame buffer must be XORed
 4-bytes-at-a-time with `E7 F3 E7 FF` before sending ("signal shaping" — see
 Ableton's own spec, linked in the file). Vendor/product ID `0x2982`/`0x1967`,
-interface `0`, bulk OUT endpoint `0x01` — all from DrivenByMoss's
-`Push2ControllerDefinition`/`PushUsbDisplay`.
+interface `0`, bulk OUT endpoint `0x01`.
 
-Drawing itself uses Bitwig's own Cairo-like 2D API
-(`host.createBitmap(w, h, BitmapFormat.ARGB32)`, then `bitmap.render(gc -> ...)`
-with `GraphicsOutput` — `setColor`, `rectangle`/`fill`, `setFontSize`,
-`showText`, `getTextExtents`/`getFontExtents` for centering). No font file is
-bundled — omitting `setFontFace` falls back to a default font, which is enough
-for the current logo text. `bitmap.getMemoryBlock().createByteBuffer()` gives
-raw pixel bytes ready to encode, no stride surprises (confirmed against
-DrivenByMoss's `BitmapImpl.encode()`, which does the same thing).
+Drawing uses Bitwig's own Cairo-like 2D API (`host.createBitmap(w, h,
+BitmapFormat.ARGB32)`, then `bitmap.render(gc -> ...)` with `GraphicsOutput` —
+`setColor`, `rectangle`/`fill`, `setFontSize`, `showText`,
+`getTextExtents`/`getFontExtents` for centering). No font file bundled —
+omitting `setFontFace` falls back to a default font. `bitmap.getMemoryBlock()
+.createByteBuffer()` gives raw pixel bytes ready to encode, no stride
+surprises.
 
 **Gotcha: Push 2's screen blanks a few seconds after its last frame**, and
 `ControllerExtension.flush()` is NOT a timer — since Bitwig 3.1 it only fires
-on actual DAW state changes (see DrivenByMoss's `ModelImpl.flushWorkaround()`
-comment). Fix, both halves required:
+on actual DAW state changes. Fix, both halves required:
 - `flush()` calls `display.refresh()` (re-sends last rendered frame, no redraw).
 - `keepDisplayAlive()`, scheduled once from `init()` via
   `host.scheduleTask(this::keepDisplayAlive, 100)`, calls `host.requestFlush()`
@@ -137,24 +151,138 @@ comment). Fix, both halves required:
 **Naming:** the human-readable name passed as `UsbDeviceMatcher`'s first
 constructor arg is what shows up in Bitwig's Settings → Controllers hardware
 device list. Match DrivenByMoss's convention:
-`getHardwareVendor() + " " + getHardwareModel()` → `"Ableton Push 2"` (not an
-arbitrary label like `"Push 2 Display"` — that was a first-pass mistake,
-already fixed).
+`getHardwareVendor() + " " + getHardwareModel()` → `"Ableton Push 2"`.
+
+### Pad grid + buttons (MIDI, not USB — only the screen is USB)
+
+- **Grid note mapping**: linear, `note = 36 + column + 8 * rowFromBottom`
+  (column 0-7 left→right, row 0 = bottom, row 7 = top; note 36 = bottom-left,
+  99 = top-right). Channel 0. Press = Note On with velocity, release = Note
+  On velocity 0 or Note Off — both normalize to "velocity 0 = release".
+- **Pad color = Note On on the same note**, `data2` (0-127) is a palette
+  index, not a real velocity. Off = index 0.
+- **Push 2's 128-color palette lives in the device's volatile memory, not
+  firmware.** A hardware power-cycle resets it to Push 2's true cold-boot
+  palette, which differs from DrivenByMoss's `DEFAULT_PALETTE` table.
+  `Push2Palette.write()` writes `Push2Colors.PALETTE` (table copied verbatim
+  from DrivenByMoss's `PushColorManager.DEFAULT_PALETTE`) to the device via
+  SysEx on every `init()`, so Actus is correct regardless of prior device
+  state — don't assume "whatever's already loaded" is right. Same table
+  backs `Push2Colors.nearest(r,g,b)` (Euclidean-distance nearest-match,
+  approximating a clip's real Bitwig color on its pad) and a few fixed
+  semantic indices (0=off, 3=white, 5=red hi, 21=green hi). SysEx write per
+  entry: `F0 00 21 1D 01 01 03 <index> <r_lo> <r_hi> <g_lo> <g_hi> <b_lo>
+  <b_hi> <w_lo> <w_hi> F7` (white always 0), then reload once with
+  `F0 00 21 1D 01 01 05 F7`.
+- **Playing clips pulse toward a fixed green (`COLOR_PLAYING_HI = 21`), not
+  a hue-matched dim of the clip's own color.** Scaling a clip's RGB down and
+  nearest-matching again is unstable near black (unrelated hues' dark shades
+  cluster close together), so don't do that — a plain semantic pulse color
+  is also just how Push 2 session views normally indicate "playing" anyway
+  (confirmed against DrivenByMoss directly).
+- **Pulsing/blinking pads**: a pad animates by sending a *second* Note On for
+  the same note on a different channel — channel 10 (`0x9A`) = slow pulse,
+  channel 14 (`0x9E`) = fast blink. **Sending that second message at all
+  turns on animation, regardless of color value** — there is no "steady"
+  no-op via matching colors. `Push2ClipLaunchRow.sendPulsing()` (both
+  channels, only for playing/queued/recording) vs `sendSteady()` (channel-0
+  only) — never send the pulse channel for a steady pad.
+- **Clip launch** = `ClipLauncherSlot.launch()` (press) /
+  `.launchRelease()` (release).
+- **Push 2 has 8 dedicated Scene Launch buttons**, separate physical controls
+  from the 64-pad grid, CC 36-43 channel 0
+  (`PushControlSurface.PUSH_BUTTON_SCENE1..8` in DrivenByMoss). We only use
+  one (`Push2SceneButtons.LAUNCH_CC = 36`), the rest are ignored/dark — same
+  treatment as pad rows 1-7. CC 36 (SCENE1) is the one physically aligned
+  with the bottom pad row (DrivenByMoss layout: SCENE1=bottom, SCENE8=top);
+  CC 43 also works but sits next to the unused top row.
+- **Encoders send relative deltas as two's-complement 7-bit CC values**: 1-63
+  = positive steps, 65-127 = negative (127 = -1, 66 = -62). Decode with
+  `value < 64 ? value : value - 128`. The encoder above Tap Tempo (CC 15,
+  `PUSH_SMALL_KNOB2` in DrivenByMoss) drives global pad LED brightness via
+  `Push2Brightness` — SysEx `F0 00 21 1D 01 01 06 <0-127> F7`. Below 10%
+  brightness Push 2's hardware itself glitches (buttons vanish, pads show
+  wrong colors — reproduced with DrivenByMoss's own script too, so it's a
+  real hardware floor); clamped to [10, 100], default 10%.
+- Bitwig's `MidiIn.setMidiCallback()` is single-slot (last caller wins), so
+  `Push2ControllerExtension.handleMidi()` is the one place all raw MIDI
+  input is dispatched from — grid notes to `Push2ClipLaunchRow`, the one
+  scene CC and the Up/Down CCs (46/47) to `Push2SceneButtons`, the brightness
+  encoder CC to `Push2Brightness`. Don't add a second `setMidiCallback()`
+  call anywhere.
+
+### "Active scene" is controller-local state, not read from Bitwig
+
+Bitwig's Controller API has **no per-scene "is playing" property** — audited
+every method on `Scene`, `SceneBank`, `ClipLauncherSlotOrScene`,
+`ClipLauncherSlotOrSceneBank` via `javap`. Only per-*clip* state exists
+(`ClipLauncherSlot.isPlaying()`/`isPlaybackQueued()`/etc.). The underline/
+brighter-button Bitwig's own UI shows when a scene is launched is real,
+internal Bitwig state, not exposed to controller scripts.
+
+Confirmed empirically: Push 2's pads/display do **not** react when a scene is
+launched by mouse in Bitwig's UI (true of DrivenByMoss's own Scenes mode
+too) — so this is controller-local by design, not a limitation we're unaware
+of. `Push2ControllerExtension.activeScene` (an `AtomicInteger`, starts at
+`-1` = "none yet") changes **only** via our own hardware
+(`Push2SceneButtons.onButtonPressed()`/`onNavigate()`), never inferred from
+clip playback state.
+
+Three entry points touch it, all in `Push2SceneButtons`:
+- **`bootstrapWithoutLaunching()`**, called once from
+  `Push2ControllerExtension.init()` — sets `activeScene` (if still `-1`) and
+  repaints, but deliberately does **not** call `.launch()`. So the bottom
+  row shows the right colors as soon as the project opens, before transport
+  play and before any button press.
+- **Scene Launch** (`LAUNCH_CC`) — launches `activeScene` exactly like
+  clicking that scene's own play button in Bitwig's sidebar. Does not change
+  *which* scene is active by itself (beyond bootstrapping if unset).
+- **Up/Down cursor buttons** (CC 46/47, `PUSH_BUTTON_UP`/`_DOWN` in
+  DrivenByMoss) — moves `activeScene` by one, clamped to `[0,
+  MAX_SCENES-1]`. Navigation only, does not launch.
+
+Any of the three, if `activeScene` is still `-1`, bootstraps it first via
+`Push2SceneButtons.findInitialScene()`: the first scene (0-127) with any
+clips, or scene 0 if the whole project has none.
+
+`activeScene` can hold any value 0-127 (`Push2ControllerExtension.MAX_SCENES`
+— the track bank is created with that many scenes), all reachable via
+Up/Down.
+
+### Matrix region ownership (the "multiple modes share the grid" plan)
+
+Longer-term plan (per user): the 8x8 grid won't be one full-screen "view"
+like DrivenByMoss's — instead different pad ranges get claimed by different
+concurrent features, likely bottom 4 rows for clip/scene management and top 4
+for submode control. `Push2ClipLaunchRow` currently claims only row 0
+(notes 36-43) and everything else (rows 1-7) is left dark on purpose. There's
+no generic "region registry" yet — `handleMidi()` just range-checks notes
+directly — because only one row-consumer exists so far. When a second one
+shows up, extract the note-range dispatch into something shared. Don't build
+that abstraction before there's a second real consumer to justify its shape.
 
 ## Current state (update this section as the project grows)
 
 - Extension registers, MIDI in/out ports 0 are opened, a popup notification
-  fires on load/unload.
-- Push 2's screen shows "Actus" centered, drawn once on `init()`
-  (`Push2Display.showText`) and kept alive by re-sending the same frame on
-  every `flush()` (`Push2Display.refresh()` — see the USB section above for
-  why this is required). USB claim is wrapped in a try/catch in
-  `Push2ControllerExtension.init()` so a missing/disconnected Push 2 logs via
-  `host.errorln()` instead of breaking the rest of init (MIDI still works).
-- Not yet done: pads (RGB LEDs, also USB — different endpoint, likely similar
-  matcher pattern), encoders, buttons, any actual session/mix behavior. The
-  display is currently static — no redraw-on-change wiring yet, since there's
-  nothing dynamic to show.
+  fires on load/unload. `Push2Palette.write()` runs first thing in `init()`.
+- Push 2's screen shows "Actus" centered, kept alive via `flush()` +
+  `keepDisplayAlive()`. USB claim wrapped in try/catch so a missing Push 2
+  logs via `host.errorln()` instead of breaking the rest of init.
+- Bottom pad row (notes 36-43) launches/stops clips on tracks 0-7 for
+  whichever scene is active. Pad color = clip's real Bitwig color,
+  nearest-matched; recording overrides to solid red; playing pulses slowly
+  toward fixed green; queued blinks fast toward white; stopped-with-content
+  is steady; empty is dark. Rows 1-7 are dark.
+- One Scene Launch button (CC 36) launches/replays `activeScene`; the other
+  7 are dark. Up/Down cursor buttons (CC 46/47) move `activeScene` by one.
+  On project load, `bootstrapWithoutLaunching()` paints the first scene
+  with clips immediately, without auto-launching it.
+- Top-left encoder above Tap Tempo (CC 15) controls global pad LED
+  brightness 10-100%, default 10%.
+- Not yet done: the other 8 display encoders, track navigation/scrolling
+  (only the first 8 tracks are reachable — no bank paging yet), the
+  top-4-rows submode concept, custom RGB clip colors beyond the fixed
+  128-entry palette.
 
 ## Maintenance note
 
