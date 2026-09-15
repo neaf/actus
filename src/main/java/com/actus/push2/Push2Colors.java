@@ -61,7 +61,6 @@ final class Push2Colors
 
     private Push2Colors()
     {
-        // Static utility.
     }
 
     /** Nearest palette index (Euclidean RGB distance) to the given 0-1 float color. */

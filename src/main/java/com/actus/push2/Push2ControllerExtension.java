@@ -9,6 +9,7 @@ import com.bitwig.extension.controller.api.ControllerHost;
 import com.bitwig.extension.controller.api.MidiIn;
 import com.bitwig.extension.controller.api.MidiOut;
 import com.bitwig.extension.controller.api.TrackBank;
+import com.bitwig.extension.controller.api.Transport;
 
 /**
  * Extension instance created by Bitwig Studio once the Push 2 is detected. This is the
@@ -33,14 +34,26 @@ public class Push2ControllerExtension extends ControllerExtension
      */
     static final int MAX_SCENES = 128;
 
+    // Push 2's Shift button - monochrome single-LED, held (not toggled) - see handleMidi. Not
+    // owned by any one row since it's a cross-cutting modifier; currently only Push2MonitorRow
+    // reads it.
+    private static final int SHIFT_CC = 49;
+
+    // Push 2's Delete button - monochrome single-LED, held (not toggled), same treatment as
+    // Shift above. Push2ClipLaunchRow reads it: hold Delete, hit a clip pad, deletes that slot.
+    private static final int DELETE_CC = 118;
+
     private MidiIn              midiIn;
     private MidiOut             midiOut;
     private Push2Display        display;
     private Push2SessionDisplay sessionDisplay;
     private Push2ClipLaunchRow  clipLaunchRow;
     private Push2StopRow        stopRow;
+    private Push2RecordRow      recordRow;
     private Push2SceneButtons   sceneButtons;
     private Push2Brightness     brightness;
+    private Push2TransportPlay  transportPlay;
+    private Push2MonitorRow     monitorRow;
 
     /** Pad rows registered for grid dispatch - see {@link #handleMidi} and CLAUDE.md's matrix-region note. */
     private final List<PadRow> padRows = new ArrayList<>();
@@ -48,6 +61,8 @@ public class Push2ControllerExtension extends ControllerExtension
     /** -1 = no scene made active yet. Controller-local only - see CLAUDE.md. */
     private final AtomicInteger activeScene = new AtomicInteger(-1);
     private volatile boolean running;
+    private volatile boolean shiftHeld;
+    private volatile boolean deleteHeld;
 
     protected Push2ControllerExtension(final Push2ControllerExtensionDefinition definition, final ControllerHost host)
     {
@@ -74,20 +89,38 @@ public class Push2ControllerExtension extends ControllerExtension
         }
 
         final TrackBank trackBank = host.createTrackBank(NUM_TRACKS, 0, MAX_SCENES);
-        this.clipLaunchRow = new Push2ClipLaunchRow(this.midiOut, trackBank, this.activeScene);
+
+        // Push2RecordRow manages Transport.isClipLauncherOverdubEnabled() itself, turning it on
+        // only while it actually has a track armed for overdub - not set here as an always-on
+        // global flag (Transport.setLauncherOverdub(boolean) throws at runtime if you're
+        // tempted to reach for it instead - deprecated since API v2, same gotcha as
+        // setShouldSendMidiBeatClock, see CLAUDE.md - always go through the
+        // SettableBooleanValue).
+        final Transport transport = host.createTransport();
+
+        this.recordRow = new Push2RecordRow(host, this.midiOut, trackBank, this.activeScene, transport);
+        this.clipLaunchRow = new Push2ClipLaunchRow(this.midiOut, trackBank, this.activeScene, this.recordRow, () -> this.deleteHeld);
         this.stopRow = new Push2StopRow(this.midiOut, trackBank);
         this.padRows.add(this.clipLaunchRow);
         this.padRows.add(this.stopRow);
+        this.padRows.add(this.recordRow);
         if (this.display != null)
             this.sessionDisplay = new Push2SessionDisplay(host, this.display, trackBank, this.activeScene);
         this.sceneButtons = new Push2SceneButtons(this.midiOut, trackBank.sceneBank(), this.activeScene, () -> {
             this.clipLaunchRow.redrawAll();
+            this.recordRow.redrawAll();
             this.sceneButtons.redraw();
             if (this.sessionDisplay != null)
                 this.sessionDisplay.redraw();
         });
         this.sceneButtons.bootstrapWithoutLaunching();
         this.brightness = new Push2Brightness(this.midiOut);
+        this.monitorRow = new Push2MonitorRow(this.midiOut, trackBank, () -> this.shiftHeld);
+        this.midiOut.sendMidi(0xB0, SHIFT_CC, 127); // always lit, visible in the dark - same treatment as Octave Up/Down / Stop All Clips
+        this.midiOut.sendMidi(0xB0, DELETE_CC, 127); // same - always lit
+
+        this.transportPlay = new Push2TransportPlay(this.midiOut, transport, this.recordRow);
+        this.transportPlay.redraw();
 
         this.running = true;
         if (this.display != null)
@@ -150,7 +183,13 @@ public class Push2ControllerExtension extends ControllerExtension
         else if (command == 0xB0 && data1 == Push2SceneButtons.LAUNCH_CC)
         {
             if (data2 > 0 && this.sceneButtons != null)
+            {
                 this.sceneButtons.onButtonPressed();
+                // Launching a scene doesn't reliably flip isRecording for an overdubbing clip
+                // within it (see Push2RecordRow's class doc) - ask it to finish explicitly.
+                if (this.recordRow != null)
+                    this.recordRow.finishAll();
+            }
         }
         else if (command == 0xB0 && data1 == Push2SceneButtons.STOP_ALL_CC)
         {
@@ -171,6 +210,28 @@ public class Push2ControllerExtension extends ControllerExtension
         {
             if (this.brightness != null)
                 this.brightness.onEncoderTurned(data2);
+        }
+        else if (command == 0xB0 && data1 == Push2TransportPlay.PLAY_CC)
+        {
+            if (data2 > 0 && this.transportPlay != null)
+                this.transportPlay.onButtonPressed();
+        }
+        else if (command == 0xB0 && data1 >= Push2MonitorRow.CC_START && data1 < Push2MonitorRow.CC_START + NUM_TRACKS)
+        {
+            if (this.monitorRow != null)
+                this.monitorRow.onButtonEvent(data1 - Push2MonitorRow.CC_START, data2 > 0);
+        }
+        else if (command == 0xB0 && data1 == SHIFT_CC)
+        {
+            // Held, not toggled - a Note On style press/release pair via CC (data2 > 0 = held).
+            // LED stays always lit (see init()) so it's visible in the dark - held state is
+            // tracked in shiftHeld only, not reflected on the button's own LED.
+            this.shiftHeld = data2 > 0;
+        }
+        else if (command == 0xB0 && data1 == DELETE_CC)
+        {
+            // Same held-not-toggled, always-lit treatment as Shift above.
+            this.deleteHeld = data2 > 0;
         }
     }
 }

@@ -6,22 +6,17 @@ import com.bitwig.extension.controller.api.MidiOut;
 import com.bitwig.extension.controller.api.SceneBank;
 
 /**
- * Owns everything that changes or triggers {@code activeScene}:
+ * Owns everything that changes or triggers {@code activeScene}.
  *
- * <ul>
- * <li>The one wired Scene Launch button ({@link #LAUNCH_CC}, out of Push 2's 8 dedicated Scene
+ * The one wired Scene Launch button ({@link #LAUNCH_CC}, out of Push 2's 8 dedicated Scene
  * Launch buttons at CC 36-43 - not part of the 64-pad grid). The other 7 are left dark/ignored,
- * same treatment as pad rows 1-7. Confirmed working end-to-end (CC protocol, pad launch, scene
- * launch) - an earlier "nothing responds" report turned out to be a {@code markInterested()}
- * crash (see CLAUDE.md), not the wrong CC, so this is back down to a single button. CC 36
- * (DrivenByMoss's SCENE1) is the one physically aligned with the bottom pad row - the row
- * {@link Push2ClipLaunchRow} actually uses - matching DrivenByMoss's own
- * `PUSH_BUTTON_SCENE1 + 7 - i` layout (SCENE1 = bottom, SCENE8 = top); CC 43 (SCENE8, top) also
- * works but sits next to the dark, unused top row instead.
- * <li>The Up/Down cursor buttons (CC 46/47, {@code PUSH_BUTTON_UP}/{@code _DOWN} in
- * DrivenByMoss) move {@code activeScene} by one - added because there is otherwise no way to
- * reach any scene but the bootstrap one. Navigation only; it does not launch anything.
- * </ul>
+ * same treatment as pad rows 1-7. CC 36 (DrivenByMoss's SCENE1) is physically aligned with the
+ * bottom pad row that {@link Push2ClipLaunchRow} uses, matching DrivenByMoss's own
+ * `PUSH_BUTTON_SCENE1 + 7 - i` layout (SCENE1 = bottom, SCENE8 = top).
+ *
+ * The Up/Down cursor buttons (CC 46/47, {@code PUSH_BUTTON_UP}/{@code _DOWN} in DrivenByMoss)
+ * move {@code activeScene} by one - added because there is otherwise no way to reach any scene
+ * but the bootstrap one. Navigation only; it does not launch anything.
  *
  * Scene Launch behaves exactly like clicking that scene's own play button in Bitwig's session
  * sidebar: it always launches {@code activeScene}, it never picks a different scene itself. If
@@ -42,9 +37,9 @@ public class Push2SceneButtons
     // Push 2's physical Octave Up/Down buttons, repurposed as an extra pair of scene
     // navigation buttons (same one-scene-at-a-time move as the Up/Down cursor buttons below,
     // just physically separate) since Actus has no note/octave transposition feature to give
-    // them their usual job. Not RGB like the scene/pad buttons above - Octave Up/Down are plain
-    // monochrome single-LED buttons (confirmed via DrivenByMoss's MONOCHROME_BUTTONS set), so
-    // the CC value sent is a raw 0-127 brightness, not a Push2Colors palette index.
+    // them their usual job. Monochrome single-LED buttons, not RGB - the CC value sent is still
+    // a Push2Colors palette index, resolved against the palette entry's white field (see
+    // CLAUDE.md's white-LED gotcha).
     static final int OCTAVE_DOWN_CC = 54; // later scenes - matches DOWN_CC's direction
     static final int OCTAVE_UP_CC   = 55; // earlier scenes - matches UP_CC's direction
 

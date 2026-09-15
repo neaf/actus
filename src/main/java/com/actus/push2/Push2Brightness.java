@@ -4,17 +4,15 @@ import com.bitwig.extension.controller.api.MidiOut;
 
 /**
  * Push 2's global pad LED brightness, controlled by the dedicated small encoder above the Tap
- * Tempo button (CC 15, {@code PUSH_SMALL_KNOB2} in DrivenByMoss's {@code PushControlSurface} -
- * confirmed on real hardware; CC 14/{@code PUSH_SMALL_KNOB1} was tried first and also worked
- * but CC 15 is the one wired now). Same SysEx command Ableton Live's own Push 2 integration and
- * DrivenByMoss use for this setting (DrivenByMoss's
- * {@code PushControlSurface.sendLEDBrightness()}).
+ * Tempo button (CC 15, {@code PUSH_SMALL_KNOB2} in DrivenByMoss's {@code PushControlSurface}).
+ * Same SysEx command Ableton Live's own Push 2 integration and DrivenByMoss use for this setting
+ * (DrivenByMoss's {@code PushControlSurface.sendLEDBrightness()}).
  */
 public class Push2Brightness
 {
     static final int ENCODER_CC = 15;
 
-    private static final int DEFAULT_PERCENT = 10;
+    private static final int DEFAULT_PERCENT = 100;
 
     // Below 10%, Push 2's hardware itself glitches - buttons disappearing entirely, pads
     // showing the wrong color outright - reproduced with DrivenByMoss's own script too, so

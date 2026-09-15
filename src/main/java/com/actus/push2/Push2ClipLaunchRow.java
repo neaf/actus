@@ -1,6 +1,7 @@
 package com.actus.push2;
 
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.BooleanSupplier;
 
 import com.bitwig.extension.controller.api.ClipLauncherSlotBank;
 import com.bitwig.extension.controller.api.MidiOut;
@@ -11,6 +12,17 @@ import com.bitwig.extension.controller.api.TrackBank;
  * Owns the bottom row of the pad grid (notes 36-43, one pad per track) as a clip launcher for
  * whichever scene {@code activeScene} currently points at - not the full 8x8 session grid.
  * Other rows are left to whatever claims them next (see CLAUDE.md's matrix-region note).
+ *
+ * A press on a track {@link Push2RecordRow} currently has armed for recording/overdub calls
+ * {@link Push2RecordRow#finish} instead of the normal {@code launch()} - relaunching a clip
+ * mid-overdub would reset its playhead exactly like the launch calls that row itself avoids for
+ * the same reason (see its class doc), so this pad finishes the overdub in place rather than
+ * restarting the clip, same as what the transport Play button does.
+ *
+ * Holding the Delete button (CC 118, queried live via the {@code deleteHeld} supplier passed in,
+ * not cached) turns a press into {@code ClipLauncherSlot.deleteObject()} instead of a launch -
+ * deletes whatever's in that track's slot for the active scene, empty or not. Neither the
+ * overdub-finish check above nor a normal launch/launchRelease happens while Delete is held.
  */
 public class Push2ClipLaunchRow implements PadRow
 {
@@ -33,6 +45,8 @@ public class Push2ClipLaunchRow implements PadRow
     private final MidiOut       midiOut;
     private final Track []      tracks = new Track [NUM_TRACKS];
     private final AtomicInteger activeScene;
+    private final Push2RecordRow  recordRow;
+    private final BooleanSupplier deleteHeld;
 
     private final boolean [] [] hasContent  = new boolean [NUM_TRACKS] [MAX_SCENES];
     private final boolean [] [] isPlaying   = new boolean [NUM_TRACKS] [MAX_SCENES];
@@ -40,10 +54,12 @@ public class Push2ClipLaunchRow implements PadRow
     private final boolean [] [] isRecording = new boolean [NUM_TRACKS] [MAX_SCENES];
     private final int [] [] clipColor = new int [NUM_TRACKS] [MAX_SCENES];
 
-    public Push2ClipLaunchRow(final MidiOut midiOut, final TrackBank trackBank, final AtomicInteger activeScene)
+    public Push2ClipLaunchRow(final MidiOut midiOut, final TrackBank trackBank, final AtomicInteger activeScene, final Push2RecordRow recordRow, final BooleanSupplier deleteHeld)
     {
         this.midiOut = midiOut;
         this.activeScene = activeScene;
+        this.recordRow = recordRow;
+        this.deleteHeld = deleteHeld;
 
         for (int t = 0; t < NUM_TRACKS; t++)
         {
@@ -78,6 +94,19 @@ public class Push2ClipLaunchRow implements PadRow
         final int scene = this.activeScene.get();
         if (scene < 0)
             return; // no active scene yet - nothing to launch until the scene button bootstraps one
+
+        if (this.deleteHeld.getAsBoolean())
+        {
+            if (velocity > 0)
+                this.tracks[column].clipLauncherSlotBank().getItemAt(scene).deleteObject();
+            return; // neither a press nor a release falls through to launch while Delete is held
+        }
+
+        if (velocity > 0 && this.recordRow.isArmed(column))
+        {
+            this.recordRow.finish(column); // finish the overdub, don't relaunch - see class doc
+            return;
+        }
 
         final ClipLauncherSlotBank slots = this.tracks[column].clipLauncherSlotBank();
         if (velocity > 0)
@@ -127,12 +156,9 @@ public class Push2ClipLaunchRow implements PadRow
     }
 
     /**
-     * A pad only animates if a message is sent on the pulse channel (10/14) AT ALL - sending
-     * one with the pulse color equal to the base color does not read as "steady", it still
-     * pulses (confirmed the hard way; DrivenByMoss's own PadGridImpl only ever calls its
-     * blink-channel send when a real blink color is set, never as a same-color no-op). So
-     * steady pads must go through {@link #sendSteady} instead, which never touches that
-     * channel.
+     * A pad only animates if a message is sent on the pulse channel (10/14) at all - sending one
+     * with the pulse color equal to the base color still pulses. Steady pads must go through
+     * {@link #sendSteady} instead, which never touches that channel.
      */
     private void sendPulsing(final int column, final int baseColor, final int pulseChannel, final int pulseColor)
     {
