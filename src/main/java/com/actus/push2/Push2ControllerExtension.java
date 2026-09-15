@@ -36,6 +36,7 @@ public class Push2ControllerExtension extends ControllerExtension
     private MidiIn              midiIn;
     private MidiOut             midiOut;
     private Push2Display        display;
+    private Push2SessionDisplay sessionDisplay;
     private Push2ClipLaunchRow  clipLaunchRow;
     private Push2StopRow        stopRow;
     private Push2SceneButtons   sceneButtons;
@@ -66,7 +67,6 @@ public class Push2ControllerExtension extends ControllerExtension
         try
         {
             this.display = new Push2Display(host);
-            this.display.showText("Actus");
         }
         catch (final RuntimeException ex)
         {
@@ -78,9 +78,13 @@ public class Push2ControllerExtension extends ControllerExtension
         this.stopRow = new Push2StopRow(this.midiOut, trackBank);
         this.padRows.add(this.clipLaunchRow);
         this.padRows.add(this.stopRow);
+        if (this.display != null)
+            this.sessionDisplay = new Push2SessionDisplay(host, this.display, trackBank, this.activeScene);
         this.sceneButtons = new Push2SceneButtons(this.midiOut, trackBank.sceneBank(), this.activeScene, () -> {
             this.clipLaunchRow.redrawAll();
             this.sceneButtons.redraw();
+            if (this.sessionDisplay != null)
+                this.sessionDisplay.redraw();
         });
         this.sceneButtons.bootstrapWithoutLaunching();
         this.brightness = new Push2Brightness(this.midiOut);
@@ -97,6 +101,8 @@ public class Push2ControllerExtension extends ControllerExtension
     public void exit()
     {
         this.running = false;
+        if (this.display != null)
+            this.display.shutdown();
         this.getHost().showPopupNotification("Actus Push 2 exited");
     }
 
@@ -155,6 +161,11 @@ public class Push2ControllerExtension extends ControllerExtension
         {
             if (data2 > 0 && this.sceneButtons != null)
                 this.sceneButtons.onNavigate(data1 == 46 ? -1 : 1);
+        }
+        else if (command == 0xB0 && (data1 == Push2SceneButtons.OCTAVE_DOWN_CC || data1 == Push2SceneButtons.OCTAVE_UP_CC)) // Octave Up/Down buttons - move the scene window
+        {
+            if (data2 > 0 && this.sceneButtons != null)
+                this.sceneButtons.onNavigate(data1 == Push2SceneButtons.OCTAVE_UP_CC ? -1 : 1);
         }
         else if (command == 0xB0 && data1 == Push2Brightness.ENCODER_CC)
         {

@@ -15,11 +15,19 @@ public class Push2StopRow implements PadRow
     private static final int NUM_TRACKS = 8;
     private static final int START_NOTE = 44;
 
+    // Same pulse-channel trick as Push2ClipLaunchRow - see its class doc for why a second
+    // Note On on channel 14 is what makes a pad blink at all.
+    private static final int CHANNEL_STATIC     = 0x90;
+    private static final int CHANNEL_PULSE_FAST = 0x9E;
+
     private static final int COLOR_OFF  = 0;
     private static final int COLOR_STOP = 1; // dim grey - barely lit, not a loud alert color
 
     private final MidiOut  midiOut;
     private final Track [] tracks = new Track [NUM_TRACKS];
+
+    private final boolean [] stopped      = new boolean [NUM_TRACKS];
+    private final boolean [] queuedForStop = new boolean [NUM_TRACKS];
 
     public Push2StopRow(final MidiOut midiOut, final TrackBank trackBank)
     {
@@ -30,7 +38,14 @@ public class Push2StopRow implements PadRow
             final int col = t;
             final Track track = trackBank.getItemAt(t);
             this.tracks[t] = track;
-            track.isStopped().addValueObserver(stopped -> this.redrawPad(col, stopped));
+            track.isStopped().addValueObserver(value -> {
+                this.stopped[col] = value;
+                this.redrawPad(col);
+            });
+            track.isQueuedForStop().addValueObserver(value -> {
+                this.queuedForStop[col] = value;
+                this.redrawPad(col);
+            });
         }
     }
 
@@ -48,8 +63,31 @@ public class Push2StopRow implements PadRow
             this.tracks[column].stop();
     }
 
-    private void redrawPad(final int column, final boolean stopped)
+    private void redrawPad(final int column)
     {
-        this.midiOut.sendMidi(0x90, START_NOTE + column, stopped ? COLOR_OFF : COLOR_STOP);
+        if (this.stopped[column])
+        {
+            this.sendSteady(column, COLOR_OFF);
+            return;
+        }
+
+        // Blinks toward dark (not brighter) while a press of the stop pad is waiting for the
+        // next quantization boundary - reads as "fading out", matching what it's about to do.
+        if (this.queuedForStop[column])
+            this.sendPulsing(column, COLOR_STOP, CHANNEL_PULSE_FAST, COLOR_OFF);
+        else
+            this.sendSteady(column, COLOR_STOP);
+    }
+
+    private void sendPulsing(final int column, final int baseColor, final int pulseChannel, final int pulseColor)
+    {
+        final int note = START_NOTE + column;
+        this.midiOut.sendMidi(CHANNEL_STATIC, note, baseColor);
+        this.midiOut.sendMidi(pulseChannel, note, pulseColor);
+    }
+
+    private void sendSteady(final int column, final int color)
+    {
+        this.midiOut.sendMidi(CHANNEL_STATIC, START_NOTE + column, color);
     }
 }

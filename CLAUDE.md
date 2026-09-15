@@ -56,6 +56,7 @@ A/B comparison while testing.
 | Extension identity, MIDI auto-detection, USB device matcher | `src/main/java/com/actus/push2/Push2ControllerExtensionDefinition.java` |
 | Extension instance, central MIDI dispatch (init/exit/flush) | `src/main/java/com/actus/push2/Push2ControllerExtension.java` |
 | Push 2 screen rendering + USB frame send | `src/main/java/com/actus/push2/Push2Display.java` |
+| Screen-only 3-row session clip grid (adapted from DrivenByMoss, see below) | `src/main/java/com/actus/push2/Push2SessionDisplay.java` |
 | One row of the pad grid, dispatched by note range (see matrix-region note) | `src/main/java/com/actus/push2/PadRow.java` |
 | Bottom pad row = clip launcher for the active scene | `src/main/java/com/actus/push2/Push2ClipLaunchRow.java` |
 | Row above it = per-track stop (independent of active scene) | `src/main/java/com/actus/push2/Push2StopRow.java` |
@@ -136,10 +137,122 @@ interface `0`, bulk OUT endpoint `0x01`.
 Drawing uses Bitwig's own Cairo-like 2D API (`host.createBitmap(w, h,
 BitmapFormat.ARGB32)`, then `bitmap.render(gc -> ...)` with `GraphicsOutput` —
 `setColor`, `rectangle`/`fill`, `setFontSize`, `showText`,
-`getTextExtents`/`getFontExtents` for centering). No font file bundled —
+`getTextExtents`/`getFontExtents` for centering, `save`/`rectangle`/`clip`/
+`restore` to constrain drawing to one region). No font file bundled —
 omitting `setFontFace` falls back to a default font. `bitmap.getMemoryBlock()
 .createByteBuffer()` gives raw pixel bytes ready to encode, no stride
-surprises.
+surprises. `Push2Display.render(Renderer)` is the generic entry point (paint
++ send in one call); `showText()` is a thin convenience wrapper over it.
+
+### Session clip grid on the screen (adapted from DrivenByMoss)
+
+`Push2SessionDisplay` draws a 7-row x 8-column clip grid on the screen —
+**screen only**, no relationship to the pad grid, `PadRow`, or
+`Push2ClipLaunchRow`'s per-scene pad state (deliberately separate caches;
+see the matrix-region note for why pad rows stay independent of this).
+Adapted from DrivenByMoss's `SessionMode.updateDisplay2Clips()` /
+`ClipListComponent` (Push 2's screen-side clip-grid rendering, distinct from
+`AbstractSessionView` which is pads-only) — same idea (fill rect + state
+border + name text per cell, using `save()`/`clip()`/`restore()` to keep
+text/fills inside one cell), reimplemented directly against our own
+`GraphicsOutput` calls rather than DBM's `IGraphicsContext` wrapper.
+
+- **Row mapping**: rows run top-to-bottom in ascending scene order, same
+  direction as Bitwig's own Session view sidebar — `BACK` (2) rows above
+  `activeScene`, then `activeScene` itself (row index `BACK`, marked with a
+  white strip down both its left and right edges, plus every non-current
+  row is dimmed (`Push2SessionDisplay.DIM = 0.18`, applied to fill/border/
+  name colors alike) so it stands out - a full-row filled background and a
+  full-row rectangle outline (grey, then white, then green) were tried and
+  rejected before landing on left/right strips + dimming), then `FORWARD`
+  (4) rows below it.
+  `ROWS = BACK + 1 + FORWARD = 7`. A row whose scene index would
+  fall outside `[0, MAX_SCENES)` (no scene that far
+  back/forward yet) is left empty — not filled with the active scene
+  repeated — per explicit request.
+- **State cache**: `Push2SessionDisplay` keeps its own
+  `[track][scene]`-indexed cache (hasContent/isPlaying/isQueued/
+  isRecording/color/name) via its own `ClipLauncherSlotBank` observers,
+  covering all `MAX_SCENES` scenes exactly like `Push2ClipLaunchRow` does
+  for the pads — sized the same way (bank created with
+  `numScenes = MAX_SCENES`, so every scene is already addressable, no
+  paging/scrolling needed at the Bitwig API level). This is intentionally a
+  **second**, independent set of observers rather than sharing
+  `Push2ClipLaunchRow`'s cache — screen needs true RGB floats (not the
+  palette-nearest-matched index pads use) plus clip names pads never needed
+  at all. Revisit sharing only if a third consumer needs the same per-slot
+  data (mirrors the `PadRow` extraction reasoning).
+- **Redraw triggers, coalesced within a tick.** Any observer firing for a
+  scene inside the currently visible window (`[activeScene - BACK,
+  activeScene + FORWARD]`) schedules a repaint; changes outside that
+  window are cached but don't touch the screen. **Gotcha, confirmed on
+  real hardware**: two clips that Bitwig launches "at the same instant"
+  (e.g. both queued to start on the next bar) still arrive as two separate
+  `isPlaying` observer callbacks, not one. Calling `redraw()` directly
+  from each one made simultaneous launches visibly light up one after
+  another on the physical screen, not together - each callback triggered
+  its own immediate full repaint + USB send. Fixed with a coalescing
+  scheduler: `redrawIfVisible()` calls `scheduleRedraw()`, which sets a
+  `redrawScheduled` flag and does `host.scheduleTask(..., 0)` only if one
+  isn't already pending; any number of state changes arriving before that
+  deferred task runs collapse into a single `redraw()` that reflects all
+  of them at once. `Push2ControllerExtension`'s `onSceneChanged` callback
+  (the same one that already repaints `Push2ClipLaunchRow` and
+  `Push2SceneButtons` when `activeScene` changes) still calls
+  `sessionDisplay.redraw()` directly, not through the scheduler - a
+  user-initiated scene change is a single discrete event, not a burst.
+- **Cell state, two clean states, purely event-driven (no animation
+  loop - redraws only happen from `ClipLauncherSlotBank` observer
+  callbacks, same as everywhere else in this file)**: recording/playing/
+  queued are filled solid with the clip's color plus a border - red
+  (recording) / white (playing) / grey (queued). Stopped-with-content is
+  zero fill, outline only in the clip's own color, blank interior - the
+  clip name (if any) also draws in the clip's color rather than black,
+  since there's no fill to contrast black text against. No content =
+  nothing drawn, black background shows through.
+- **Playback progress bar: tried and abandoned, not just unimplemented.**
+  Wanted: a playing cell darkens left-to-right as it plays, matching
+  Bitwig's own clip progress indicator. Needs a real `Clip` cursor per
+  track (`ClipLauncherSlotBank` has no position data) - a `CursorTrack`
+  pinned to that track (`selectChannel` + `isPinned(true)`) so it doesn't
+  follow Bitwig's real UI selection, plus a `PinnableCursorClip`
+  (`createLauncherCursorClip`) for `getPlayStart()`/`getPlayStop()`.
+
+  **Root cause, confirmed by tracing DrivenByMoss's own working
+  implementation (`ModelImpl.java`, `CursorClipImpl.java`,
+  `AbstractSessionView.onGridNote()`)**: `ClipLauncherSlot.select()`
+  doesn't do anything to a cursor directly - it changes Bitwig's real UI
+  track selection, and a `PinnableCursorClip` only updates because its
+  parent `CursorTrack` is configured to *follow* that real selection
+  (`shouldFollowSelection = true`). DBM uses exactly **one** global
+  `CursorTrack` this way - it has no per-track-pinned-cursor pattern at
+  all, anywhere. With `shouldFollowSelection = false` (required for 8
+  independent per-track cursors that don't get hijacked by whatever the
+  user clicks), `select()` - by any of six different call variations
+  tried, including ones that either silently no-op or hard-throw at
+  runtime despite compiling clean - can never move them. This is a real
+  Bitwig Controller API constraint, not a bug in this codebase: **there is
+  no way to bind a `PinnableCursorClip` to an arbitrary clip without
+  hijacking Bitwig's actual UI selection.** A single-shared-cursor design
+  (one clip's progress at a time, visibly stealing focus in Bitwig's UI on
+  every launch) was considered and explicitly rejected - too disruptive
+  for a live-performance controller. Don't re-attempt the per-track-pinned
+  version without new information; if this is revisited, start from the
+  single-shared-cursor tradeoff, not from scratch.
+- **Extra navigation buttons**: Push 2's physical **Octave Up/Octave Down**
+  buttons (`Push2SceneButtons.OCTAVE_UP_CC`/`OCTAVE_DOWN_CC` = CC 55/54,
+  `PUSH_BUTTON_OCTAVE_UP`/`_DOWN` in DrivenByMoss) are repurposed as a
+  second pair of scene-navigation buttons — same one-scene-at-a-time move
+  as the Up/Down cursor buttons (`Push2SceneButtons.onNavigate(±1)`), just a
+  physically separate pair — since Actus has no note/octave transposition
+  feature to give them their usual job. (An earlier attempt bound these to
+  a coarser multi-scene "page" jump; reverted per explicit request - Octave
+  Up/Down should move one scene, same as Up/Down.) These are plain
+  monochrome single-LED buttons (confirmed via DrivenByMoss's
+  `MONOCHROME_BUTTONS` set) - the CC value sent is a raw 0-127 brightness,
+  not a `Push2Colors` palette index; `Push2SceneButtons.redraw()` lights
+  both steady at full brightness (127) purely so they're visible in the
+  dark, same "always available" treatment as `STOP_ALL_CC`.
 
 **Gotcha: Push 2's screen blanks a few seconds after its last frame**, and
 `ControllerExtension.flush()` is NOT a timer — since Bitwig 3.1 it only fires
@@ -149,6 +262,23 @@ on actual DAW state changes. Fix, both halves required:
   `host.scheduleTask(this::keepDisplayAlive, 100)`, calls `host.requestFlush()`
   then reschedules itself every 100ms until `exit()` sets `running = false`.
   `requestFlush()` just asks Bitwig to call `flush()` once, soon.
+
+**Performance note (compared against DrivenByMoss's `PushUsbDisplay`):**
+`Push2Display.refresh()` offloads the actual blocking USB transfer (two
+`pipe.write()` calls, up to 1000ms timeout each) to a single-thread
+`ExecutorService`, same as DBM's `PushUsbDisplay.sendExecutor` - otherwise a
+stalled write could block whatever thread called `refresh()`, which for us
+is the same scheduled task driving `keepDisplayAlive()` (the screen is
+purely event-driven otherwise - no animation timer). A `volatile boolean
+sending` flag guards
+`frame`/`frameBlock`: `refresh()` skips entirely (touches neither) if a send
+is still in flight, rather than racing the background thread - dropping an
+occasional frame is harmless for a display. `shutdown()` stops the executor,
+called from `exit()`. DBM's own display loop is otherwise mostly
+event-driven (rides Bitwig's `flush()` callback, not a fixed timer, and only
+falls back to its own 100ms timer while the transport is stopped) and does a
+cheap `ModelInfo`-equality dirty-check before repainting the canvas -
+neither applies well to our much simpler screen, so not adopted.
 
 **Naming:** the human-readable name passed as `UsbDeviceMatcher`'s first
 constructor arg is what shows up in Bitwig's Settings → Controllers hardware
@@ -174,8 +304,30 @@ device list. Match DrivenByMoss's convention:
   approximating a clip's real Bitwig color on its pad) and a few fixed
   semantic indices (0=off, 3=white, 5=red hi, 21=green hi). SysEx write per
   entry: `F0 00 21 1D 01 01 03 <index> <r_lo> <r_hi> <g_lo> <g_hi> <b_lo>
-  <b_hi> <w_lo> <w_hi> F7` (white always 0), then reload once with
-  `F0 00 21 1D 01 01 05 F7`.
+  <b_hi> <w_lo> <w_hi> F7`, then reload once with `F0 00 21 1D 01 01 05 F7`.
+
+  **Gotcha: plain white-LED buttons (Octave Up/Down, Up/Down, Shift, etc. -
+  anything that isn't an RGB pad or an RGB-colored button like Scene
+  Launch) read the palette entry's separate white field, not r/g/b** —
+  confirmed against Ableton's own published `Push2-map.json`/
+  `AbletonPush2MIDIDisplayInterface.asc` MIDI spec (`doc/` in
+  `github.com/Ableton/push-interface`). The CC/note velocity sent to one of
+  these buttons is a palette index exactly like for RGB LEDs, just resolved
+  against `white` instead. `Push2Colors.PALETTE` has no white component
+  (copied verbatim from DrivenByMoss's r/g/b-only `DEFAULT_PALETTE`), so
+  `Push2Palette.write()` derives one — `white = max(r, g, b)` per entry —
+  rather than sending a flat 0. Sending flat 0 (an earlier version of this
+  file did) silently makes **every** monochrome button on the device
+  permanently unlightable, since every index it could possibly be told to
+  use has a zeroed white channel — this is exactly what happened when
+  `Push2SceneButtons` first tried to light the Octave Up/Down buttons: input
+  worked (confirmed via scene navigation), but the LEDs stayed dark no
+  matter the value sent or how many times Bitwig was restarted, because the
+  bug was in the palette data, not the button-handling code. DrivenByMoss
+  avoids this by reading each entry's existing (factory-default) white
+  value off the device before writing (`ColorPaletteEntry.requiresUpdate()`)
+  rather than deriving one — Actus doesn't have that read-back machinery,
+  so the derived value is an approximation, not a factory-accurate one.
 - **Playing clips pulse toward a fixed green (`COLOR_PLAYING_HI = 21`), not
   a hue-matched dim of the clip's own color.** Scaling a clip's RGB down and
   nearest-matching again is unstable near black (unrelated hues' dark shades
@@ -189,14 +341,38 @@ device list. Match DrivenByMoss's convention:
   no-op via matching colors. `Push2ClipLaunchRow.sendPulsing()` (both
   channels, only for playing/queued/recording) vs `sendSteady()` (channel-0
   only) — never send the pulse channel for a steady pad.
+- **Animation shape/timing is driven by MIDI real-time clock (`0xF8`, 24
+  per quarter note), sent by whatever the active MIDI clock source is —
+  not something Actus's code controls.** Without it, pulse/blink animation
+  shape is undefined (this caused pads to pulse with a broken "instant
+  color then slow decay" look). Two dead ends before landing here:
+  1. Hand-rolling it (`Push2ClockSync`, deleted) - sent `0xF8`/`0xFA`/`0xFC`
+     directly via `MidiOut.sendMidi()`, which threw
+     `IllegalArgumentException: Parameter status (=250) must be in the
+     range 0 to 239` - `sendMidi()` only accepts channel messages, never
+     system real-time ones, so this could never have worked.
+  2. `midiOut.setShouldSendMidiBeatClock(true)` - compiles, but **throws
+     at runtime**: `"This has been deprecated since API version 2: Users
+     should enable the clock from the settings."` This aborts the rest of
+     `init()` if left in (worse than not calling it at all - none of
+     `keepDisplayAlive`/`sessionDisplay.startAnimating` ever ran), so it
+     was removed entirely, not just left as a compile-time warning.
+  **Actual fix: a Bitwig user setting, not code** - Settings →
+  Synchronization has a per-controller "send MIDI clock" toggle the user
+  enables directly; Actus has no code path for this at all.
 - **Clip launch** = `ClipLauncherSlot.launch()` (press) /
   `.launchRelease()` (release).
 - **Per-track stop** (`Push2StopRow`, notes 44-51, row 1) uses `Track.stop()`
   / `Track.isStopped()` directly — these operate on whatever's currently
   playing/recording/queued on that track regardless of scene, so unlike the
   clip launch row this needs no per-scene state at all. Dim grey above any
-  track that isn't stopped (deliberately subtle, not a loud alert color),
-  dark otherwise.
+  track that isn't stopped (deliberately subtle, not a loud alert color);
+  once pressed, `Track.isQueuedForStop()` goes true while waiting for the
+  next quantization boundary, so the pad blinks (fast pulse channel, same
+  mechanism as a queued clip launch, but pulsing toward *off* rather than a
+  brighter color - "fading out" reads better for a pending stop than a
+  pending launch's toward-white flash) until the stop actually lands; dark
+  once truly stopped.
 - **Push 2 has 8 dedicated Scene Launch buttons**, separate physical controls
   from the 64-pad grid, CC 36-43 channel 0
   (`PushControlSurface.PUSH_BUTTON_SCENE1..8` in DrivenByMoss). We use two:
@@ -251,7 +427,10 @@ Three entry points touch it, all in `Push2SceneButtons`:
   *which* scene is active by itself (beyond bootstrapping if unset).
 - **Up/Down cursor buttons** (CC 46/47, `PUSH_BUTTON_UP`/`_DOWN` in
   DrivenByMoss) — moves `activeScene` by one, clamped to `[0,
-  MAX_SCENES-1]`. Navigation only, does not launch.
+  MAX_SCENES-1]`. Navigation only, does not launch. **Octave Up/Down**
+  (CC 55/54, repurposed - see the session-grid section above) call the same
+  `onNavigate(±1)` — a second, physically separate pair of buttons doing
+  the identical one-scene move.
 
 (`STOP_ALL_CC` is a fourth button on `Push2SceneButtons` but deliberately
 does *not* touch `activeScene` — it calls `SceneBank.stop()` directly, same
@@ -284,9 +463,17 @@ each in `handleMidi()`. A third row-consumer just needs to implement
 
 - Extension registers, MIDI in/out ports 0 are opened, a popup notification
   fires on load/unload. `Push2Palette.write()` runs first thing in `init()`.
-- Push 2's screen shows "Actus" centered, kept alive via `flush()` +
+- Push 2's screen shows a 7-row x 8-column session clip grid
+  (`Push2SessionDisplay`) — 2 rows above active scene, active scene itself
+  (marked with a white left-edge strip), 4 rows below it, top-to-bottom in
+  ascending scene order; rows with no scene that far back/forward yet are
+  empty (just the black background, no placeholder). No progress bar -
+  see the playback progress section above, a real Bitwig API constraint,
+  not planned work. Kept alive via `flush()` +
   `keepDisplayAlive()`. USB claim wrapped in try/catch so a missing Push 2
-  logs via `host.errorln()` instead of breaking the rest of init.
+  logs via `host.errorln()` instead
+  of breaking the rest of
+  init.
 - Bottom pad row (notes 36-43) launches/stops clips on tracks 0-7 for
   whichever scene is active. Pad color = clip's real Bitwig color,
   nearest-matched; recording overrides to solid red; playing pulses slowly
@@ -294,17 +481,23 @@ each in `handleMidi()`. A third row-consumer just needs to implement
   is steady; empty is dark.
 - Row above it (notes 44-51) is a per-track stop row, independent of the
   active scene: dim grey above any track with something playing/recording/
-  queued, dark when the track is stopped; pressing calls `Track.stop()`.
-  Rows 2-7 are dark.
+  queued, dark when the track is stopped, blinks fast toward off (not
+  brighter) while a stop press is queued for the next quantization
+  boundary; pressing calls `Track.stop()`. Rows 2-7 are dark.
 - Scene Launch button (CC 36) launches/replays `activeScene`; Stop All Clips
   button (CC 37, one row up, aligned with the stop row) calls
   `SceneBank.stop()` — Bitwig's own "stop everything" action, unrelated to
   `activeScene`. The other 6 Scene Launch buttons are dark. Up/Down cursor
-  buttons (CC 46/47) move `activeScene` by one. On project load,
+  buttons (CC 46/47) move `activeScene` by one; Octave Up/Down buttons
+  (CC 55/54, repurposed and lit steady so they're visible in the dark) do
+  the same, one scene at a time. On project load,
   `bootstrapWithoutLaunching()` paints the first scene with clips
   immediately, without auto-launching it.
 - Top-left encoder above Tap Tempo (CC 15) controls global pad LED
   brightness 10-100%, default 10%.
+- Pad pulse/blink animation tempo-sync is a Bitwig user setting (Settings
+  → Synchronization), not code - see the pulsing/blinking pads gotcha
+  above for why Actus has no code path for this.
 - Not yet done: the other 8 display encoders, track navigation/scrolling
   (only the first 8 tracks are reachable — no bank paging yet), the
   top-4-rows submode concept, custom RGB clip colors beyond the fixed

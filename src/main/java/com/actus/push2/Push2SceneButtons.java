@@ -39,9 +39,19 @@ public class Push2SceneButtons
     // activeScene.
     static final int STOP_ALL_CC = 37;
 
+    // Push 2's physical Octave Up/Down buttons, repurposed as an extra pair of scene
+    // navigation buttons (same one-scene-at-a-time move as the Up/Down cursor buttons below,
+    // just physically separate) since Actus has no note/octave transposition feature to give
+    // them their usual job. Not RGB like the scene/pad buttons above - Octave Up/Down are plain
+    // monochrome single-LED buttons (confirmed via DrivenByMoss's MONOCHROME_BUTTONS set), so
+    // the CC value sent is a raw 0-127 brightness, not a Push2Colors palette index.
+    static final int OCTAVE_DOWN_CC = 54; // later scenes - matches DOWN_CC's direction
+    static final int OCTAVE_UP_CC   = 55; // earlier scenes - matches UP_CC's direction
+
     private static final int COLOR_OFF    = 0;
     private static final int COLOR_ACTIVE = 21; // green, high brightness
     private static final int COLOR_STOP   = 1;  // dim grey - matches Push2StopRow, not a loud alert color
+    private static final int MONO_LIT     = 127; // full brightness for the monochrome octave buttons
 
     private final MidiOut       midiOut;
     private final SceneBank     sceneBank;
@@ -99,6 +109,8 @@ public class Push2SceneButtons
         final int color = this.activeScene.get() < 0 ? COLOR_OFF : COLOR_ACTIVE;
         this.midiOut.sendMidi(0xB0, LAUNCH_CC, color);
         this.midiOut.sendMidi(0xB0, STOP_ALL_CC, COLOR_STOP); // always available, unlike scene launch
+        this.midiOut.sendMidi(0xB0, OCTAVE_DOWN_CC, MONO_LIT); // always available - just lit so it's visible in the dark
+        this.midiOut.sendMidi(0xB0, OCTAVE_UP_CC, MONO_LIT);
     }
 
     /** First scene (0-127) with any clips, or 0 if the project has none - not a blind guess. */

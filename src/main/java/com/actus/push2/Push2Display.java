@@ -1,11 +1,14 @@
 package com.actus.push2;
 
 import java.nio.ByteBuffer;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
 import com.bitwig.extension.api.MemoryBlock;
 import com.bitwig.extension.api.graphics.Bitmap;
 import com.bitwig.extension.api.graphics.BitmapFormat;
 import com.bitwig.extension.api.graphics.FontExtents;
+import com.bitwig.extension.api.graphics.Renderer;
 import com.bitwig.extension.controller.api.ControllerHost;
 import com.bitwig.extension.controller.api.UsbDevice;
 import com.bitwig.extension.controller.api.UsbOutputPipe;
@@ -36,6 +39,15 @@ public class Push2Display
     private final MemoryBlock   headerBlock;
     private final MemoryBlock   frameBlock;
     private final byte []       frame = new byte [FRAME_SIZE];
+
+    // The actual USB transfer runs here, off the caller's thread (same idea as DrivenByMoss's
+    // PushUsbDisplay) so a slow/stalled write (up to 2s worst case, two 1000ms timeouts) can't
+    // block whatever's driving refresh() - in our case, the same scheduled task that also keeps
+    // the display alive and animates the progress wipe. `sending` guards frame/frameBlock, which
+    // the background thread reads: refresh() skips (doesn't touch either) if a send is still in
+    // flight, rather than racing it - dropping an occasional frame is harmless here.
+    private final ExecutorService sendExecutor = Executors.newSingleThreadExecutor();
+    private volatile boolean      sending;
 
     public Push2Display(final ControllerHost host)
     {
@@ -72,6 +84,13 @@ public class Push2Display
         this.refresh();
     }
 
+    /** Runs an arbitrary paint routine against the screen bitmap and sends it immediately. */
+    public void render(final Renderer painter)
+    {
+        this.bitmap.render(painter);
+        this.refresh();
+    }
+
     /**
      * Re-sends the last rendered frame as-is (no redraw). Push 2's screen goes blank a few
      * seconds after its last frame, so this must be called on every host flush to keep it lit -
@@ -79,6 +98,9 @@ public class Push2Display
      */
     public void refresh()
     {
+        if (this.sending)
+            return; // previous frame still transmitting - skip this one rather than race it
+
         final ByteBuffer pixels = this.bitmap.getMemoryBlock().createByteBuffer();
         pixels.rewind();
 
@@ -117,8 +139,24 @@ public class Push2Display
         frameBuffer.clear();
         frameBuffer.put(this.frame);
 
-        this.pipe.write(this.headerBlock, TIMEOUT_MS);
-        this.pipe.write(this.frameBlock, TIMEOUT_MS);
+        this.sending = true;
+        this.sendExecutor.submit(() -> {
+            try
+            {
+                this.pipe.write(this.headerBlock, TIMEOUT_MS);
+                this.pipe.write(this.frameBlock, TIMEOUT_MS);
+            }
+            finally
+            {
+                this.sending = false;
+            }
+        });
+    }
+
+    /** Stops the background send thread. Call from the extension's exit(). */
+    public void shutdown()
+    {
+        this.sendExecutor.shutdownNow();
     }
 
     /** Push 2 wants BGR565 (5-6-5 bits), not the more common RGB565. */
