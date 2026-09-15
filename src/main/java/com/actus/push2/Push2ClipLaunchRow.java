@@ -12,7 +12,7 @@ import com.bitwig.extension.controller.api.TrackBank;
  * whichever scene {@code activeScene} currently points at - not the full 8x8 session grid.
  * Other rows are left to whatever claims them next (see CLAUDE.md's matrix-region note).
  */
-public class Push2ClipLaunchRow
+public class Push2ClipLaunchRow implements PadRow
 {
     private static final int NUM_TRACKS = 8;
     private static final int START_NOTE = 36;
@@ -65,7 +65,14 @@ public class Push2ClipLaunchRow
         }
     }
 
+    @Override
+    public int startNote()
+    {
+        return START_NOTE;
+    }
+
     /** Called from the extension's central MIDI dispatch for notes 36-43. */
+    @Override
     public void onPadPressed(final int column, final int velocity)
     {
         final int scene = this.activeScene.get();

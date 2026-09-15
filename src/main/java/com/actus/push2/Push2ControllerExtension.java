@@ -1,5 +1,7 @@
 package com.actus.push2;
 
+import java.util.ArrayList;
+import java.util.List;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import com.bitwig.extension.controller.ControllerExtension;
@@ -35,8 +37,12 @@ public class Push2ControllerExtension extends ControllerExtension
     private MidiOut             midiOut;
     private Push2Display        display;
     private Push2ClipLaunchRow  clipLaunchRow;
+    private Push2StopRow        stopRow;
     private Push2SceneButtons   sceneButtons;
     private Push2Brightness     brightness;
+
+    /** Pad rows registered for grid dispatch - see {@link #handleMidi} and CLAUDE.md's matrix-region note. */
+    private final List<PadRow> padRows = new ArrayList<>();
 
     /** -1 = no scene made active yet. Controller-local only - see CLAUDE.md. */
     private final AtomicInteger activeScene = new AtomicInteger(-1);
@@ -69,6 +75,9 @@ public class Push2ControllerExtension extends ControllerExtension
 
         final TrackBank trackBank = host.createTrackBank(NUM_TRACKS, 0, MAX_SCENES);
         this.clipLaunchRow = new Push2ClipLaunchRow(this.midiOut, trackBank, this.activeScene);
+        this.stopRow = new Push2StopRow(this.midiOut, trackBank);
+        this.padRows.add(this.clipLaunchRow);
+        this.padRows.add(this.stopRow);
         this.sceneButtons = new Push2SceneButtons(this.midiOut, trackBank.sceneBank(), this.activeScene, () -> {
             this.clipLaunchRow.redrawAll();
             this.sceneButtons.redraw();
@@ -120,17 +129,27 @@ public class Push2ControllerExtension extends ControllerExtension
         if (channel != 0)
             return;
 
-        if ((command == 0x90 || command == 0x80) && data1 >= 36 && data1 < 36 + NUM_TRACKS)
+        if (command == 0x90 || command == 0x80)
         {
-            final int column = data1 - 36;
             final int velocity = command == 0x80 ? 0 : data2;
-            if (this.clipLaunchRow != null)
-                this.clipLaunchRow.onPadPressed(column, velocity);
+            for (final PadRow row : this.padRows)
+            {
+                if (data1 >= row.startNote() && data1 < row.startNote() + NUM_TRACKS)
+                {
+                    row.onPadPressed(data1 - row.startNote(), velocity);
+                    break;
+                }
+            }
         }
         else if (command == 0xB0 && data1 == Push2SceneButtons.LAUNCH_CC)
         {
             if (data2 > 0 && this.sceneButtons != null)
                 this.sceneButtons.onButtonPressed();
+        }
+        else if (command == 0xB0 && data1 == Push2SceneButtons.STOP_ALL_CC)
+        {
+            if (data2 > 0 && this.sceneButtons != null)
+                this.sceneButtons.onStopAllPressed();
         }
         else if (command == 0xB0 && (data1 == 46 || data1 == 47)) // Up / Down cursor buttons
         {

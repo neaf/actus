@@ -33,8 +33,15 @@ public class Push2SceneButtons
 {
     static final int LAUNCH_CC = 36;
 
+    // One row up from LAUNCH_CC, aligned with Push2StopRow (notes 44-51) the same way LAUNCH_CC
+    // aligns with Push2ClipLaunchRow (notes 36-43). Mirrors Bitwig's own "Stop All Clips" button
+    // in the Clip Launcher's scenes sidebar - stops every track's playing clip, unrelated to
+    // activeScene.
+    static final int STOP_ALL_CC = 37;
+
     private static final int COLOR_OFF    = 0;
     private static final int COLOR_ACTIVE = 21; // green, high brightness
+    private static final int COLOR_STOP   = 1;  // dim grey - matches Push2StopRow, not a loud alert color
 
     private final MidiOut       midiOut;
     private final SceneBank     sceneBank;
@@ -72,6 +79,12 @@ public class Push2SceneButtons
         this.sceneBank.getScene(this.activeScene.get()).launch();
     }
 
+    /** Called from the central MIDI dispatch when the Stop All Clips button is pressed. */
+    public void onStopAllPressed()
+    {
+        this.sceneBank.stop();
+    }
+
     /** Called from the central MIDI dispatch for the Up (delta -1) / Down (delta +1) buttons. */
     public void onNavigate(final int delta)
     {
@@ -85,6 +98,7 @@ public class Push2SceneButtons
     {
         final int color = this.activeScene.get() < 0 ? COLOR_OFF : COLOR_ACTIVE;
         this.midiOut.sendMidi(0xB0, LAUNCH_CC, color);
+        this.midiOut.sendMidi(0xB0, STOP_ALL_CC, COLOR_STOP); // always available, unlike scene launch
     }
 
     /** First scene (0-127) with any clips, or 0 if the project has none - not a blind guess. */

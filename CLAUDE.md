@@ -56,8 +56,10 @@ A/B comparison while testing.
 | Extension identity, MIDI auto-detection, USB device matcher | `src/main/java/com/actus/push2/Push2ControllerExtensionDefinition.java` |
 | Extension instance, central MIDI dispatch (init/exit/flush) | `src/main/java/com/actus/push2/Push2ControllerExtension.java` |
 | Push 2 screen rendering + USB frame send | `src/main/java/com/actus/push2/Push2Display.java` |
+| One row of the pad grid, dispatched by note range (see matrix-region note) | `src/main/java/com/actus/push2/PadRow.java` |
 | Bottom pad row = clip launcher for the active scene | `src/main/java/com/actus/push2/Push2ClipLaunchRow.java` |
-| Scene Launch + Up/Down buttons (own the active-scene state) | `src/main/java/com/actus/push2/Push2SceneButtons.java` |
+| Row above it = per-track stop (independent of active scene) | `src/main/java/com/actus/push2/Push2StopRow.java` |
+| Scene Launch + Stop All Clips + Up/Down buttons (own the active-scene state) | `src/main/java/com/actus/push2/Push2SceneButtons.java` |
 | Push 2's 128-color palette + nearest-color matching | `src/main/java/com/actus/push2/Push2Colors.java` |
 | Writes the color palette to the device via SysEx on init | `src/main/java/com/actus/push2/Push2Palette.java` |
 | Global pad LED brightness (top-left encoder) | `src/main/java/com/actus/push2/Push2Brightness.java` |
@@ -189,13 +191,22 @@ device list. Match DrivenByMoss's convention:
   only) — never send the pulse channel for a steady pad.
 - **Clip launch** = `ClipLauncherSlot.launch()` (press) /
   `.launchRelease()` (release).
+- **Per-track stop** (`Push2StopRow`, notes 44-51, row 1) uses `Track.stop()`
+  / `Track.isStopped()` directly — these operate on whatever's currently
+  playing/recording/queued on that track regardless of scene, so unlike the
+  clip launch row this needs no per-scene state at all. Dim grey above any
+  track that isn't stopped (deliberately subtle, not a loud alert color),
+  dark otherwise.
 - **Push 2 has 8 dedicated Scene Launch buttons**, separate physical controls
   from the 64-pad grid, CC 36-43 channel 0
-  (`PushControlSurface.PUSH_BUTTON_SCENE1..8` in DrivenByMoss). We only use
-  one (`Push2SceneButtons.LAUNCH_CC = 36`), the rest are ignored/dark — same
-  treatment as pad rows 1-7. CC 36 (SCENE1) is the one physically aligned
-  with the bottom pad row (DrivenByMoss layout: SCENE1=bottom, SCENE8=top);
-  CC 43 also works but sits next to the unused top row.
+  (`PushControlSurface.PUSH_BUTTON_SCENE1..8` in DrivenByMoss). We use two:
+  `Push2SceneButtons.LAUNCH_CC = 36` (aligned with the clip launch row) and
+  `STOP_ALL_CC = 37` (aligned with the stop row, one up — calls
+  `SceneBank.stop()`, matching Bitwig's own "Stop All Clips" button in the
+  Clip Launcher's scenes sidebar; unrelated to `activeScene`). The remaining
+  6 are ignored/dark — same treatment as pad rows 2-7. CC 36 (SCENE1) is the
+  one physically aligned with the bottom pad row (DrivenByMoss layout:
+  SCENE1=bottom, SCENE8=top).
 - **Encoders send relative deltas as two's-complement 7-bit CC values**: 1-63
   = positive steps, 65-127 = negative (127 = -1, 66 = -62). Decode with
   `value < 64 ? value : value - 128`. The encoder above Tap Tempo (CC 15,
@@ -206,8 +217,9 @@ device list. Match DrivenByMoss's convention:
   real hardware floor); clamped to [10, 100], default 10%.
 - Bitwig's `MidiIn.setMidiCallback()` is single-slot (last caller wins), so
   `Push2ControllerExtension.handleMidi()` is the one place all raw MIDI
-  input is dispatched from — grid notes to `Push2ClipLaunchRow`, the one
-  scene CC and the Up/Down CCs (46/47) to `Push2SceneButtons`, the brightness
+  input is dispatched from — grid notes to whichever registered `PadRow`
+  owns that note range (`padRows` list), the scene CCs (36 launch, 37 stop
+  all) and the Up/Down CCs (46/47) to `Push2SceneButtons`, the brightness
   encoder CC to `Push2Brightness`. Don't add a second `setMidiCallback()`
   call anywhere.
 
@@ -241,6 +253,10 @@ Three entry points touch it, all in `Push2SceneButtons`:
   DrivenByMoss) — moves `activeScene` by one, clamped to `[0,
   MAX_SCENES-1]`. Navigation only, does not launch.
 
+(`STOP_ALL_CC` is a fourth button on `Push2SceneButtons` but deliberately
+does *not* touch `activeScene` — it calls `SceneBank.stop()` directly, same
+as `Push2StopRow`'s per-track stop calling `Track.stop()` directly.)
+
 Any of the three, if `activeScene` is still `-1`, bootstraps it first via
 `Push2SceneButtons.findInitialScene()`: the first scene (0-127) with any
 clips, or scene 0 if the whole project has none.
@@ -254,12 +270,15 @@ Up/Down.
 Longer-term plan (per user): the 8x8 grid won't be one full-screen "view"
 like DrivenByMoss's — instead different pad ranges get claimed by different
 concurrent features, likely bottom 4 rows for clip/scene management and top 4
-for submode control. `Push2ClipLaunchRow` currently claims only row 0
-(notes 36-43) and everything else (rows 1-7) is left dark on purpose. There's
-no generic "region registry" yet — `handleMidi()` just range-checks notes
-directly — because only one row-consumer exists so far. When a second one
-shows up, extract the note-range dispatch into something shared. Don't build
-that abstraction before there's a second real consumer to justify its shape.
+for submode control. Rows 0-1 (notes 36-51) are claimed —
+`Push2ClipLaunchRow` (launch) and `Push2StopRow` (stop) — rows 2-7 are left
+dark on purpose.
+
+Now that there are two row-consumers, note-range dispatch is a shared
+`PadRow` interface (`startNote()` + `onPadPressed(column, velocity)`);
+`Push2ControllerExtension` holds a `padRows` list and range-checks against
+each in `handleMidi()`. A third row-consumer just needs to implement
+`PadRow` and get added to that list — no dispatch changes required.
 
 ## Current state (update this section as the project grows)
 
@@ -272,11 +291,18 @@ that abstraction before there's a second real consumer to justify its shape.
   whichever scene is active. Pad color = clip's real Bitwig color,
   nearest-matched; recording overrides to solid red; playing pulses slowly
   toward fixed green; queued blinks fast toward white; stopped-with-content
-  is steady; empty is dark. Rows 1-7 are dark.
-- One Scene Launch button (CC 36) launches/replays `activeScene`; the other
-  7 are dark. Up/Down cursor buttons (CC 46/47) move `activeScene` by one.
-  On project load, `bootstrapWithoutLaunching()` paints the first scene
-  with clips immediately, without auto-launching it.
+  is steady; empty is dark.
+- Row above it (notes 44-51) is a per-track stop row, independent of the
+  active scene: dim grey above any track with something playing/recording/
+  queued, dark when the track is stopped; pressing calls `Track.stop()`.
+  Rows 2-7 are dark.
+- Scene Launch button (CC 36) launches/replays `activeScene`; Stop All Clips
+  button (CC 37, one row up, aligned with the stop row) calls
+  `SceneBank.stop()` — Bitwig's own "stop everything" action, unrelated to
+  `activeScene`. The other 6 Scene Launch buttons are dark. Up/Down cursor
+  buttons (CC 46/47) move `activeScene` by one. On project load,
+  `bootstrapWithoutLaunching()` paints the first scene with clips
+  immediately, without auto-launching it.
 - Top-left encoder above Tap Tempo (CC 15) controls global pad LED
   brightness 10-100%, default 10%.
 - Not yet done: the other 8 display encoders, track navigation/scrolling
