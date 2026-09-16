@@ -28,9 +28,8 @@ public class Push2ControllerExtension extends ControllerExtension
     private static final int NUM_TRACKS = 8;
 
     /**
-     * How many scenes are addressable without scrolling. activeScene can point anywhere in
-     * this range - reachable via the Up/Down buttons ({@link Push2SceneButtons#onNavigate}) -
-     * but there is no scene-bank paging yet.
+     * How many scenes are addressable. activeScene can point anywhere in this range - synced
+     * from whichever scene Bitwig itself reports as selected, see Push2SceneButtons's class doc.
      */
     static final int MAX_SCENES = 128;
 
@@ -50,6 +49,7 @@ public class Push2ControllerExtension extends ControllerExtension
     private Push2ClipLaunchRow  clipLaunchRow;
     private Push2StopRow        stopRow;
     private Push2RecordRow      recordRow;
+    private Push2ClipJumpRow    clipJumpRow;
     private Push2SceneButtons   sceneButtons;
     private Push2Brightness     brightness;
     private Push2TransportPlay  transportPlay;
@@ -60,6 +60,9 @@ public class Push2ControllerExtension extends ControllerExtension
 
     /** -1 = no scene made active yet. Controller-local only - see CLAUDE.md. */
     private final AtomicInteger activeScene = new AtomicInteger(-1);
+
+    /** -1 = nothing launched yet. Separate from activeScene - see Push2SceneButtons's class doc. */
+    private final AtomicInteger playingScene = new AtomicInteger(-1);
     private volatile boolean running;
     private volatile boolean shiftHeld;
     private volatile boolean deleteHeld;
@@ -93,6 +96,12 @@ public class Push2ControllerExtension extends ControllerExtension
         // clips on or arms for recording.
         final TrackBank trackBank = host.createMainTrackBank(NUM_TRACKS, 0, MAX_SCENES);
 
+        // A second, otherwise-unused TrackBank windowed to exactly 1 scene - purely so its
+        // bank-level indication (see Push2SceneButtons's class doc) frames exactly one row on
+        // Bitwig's own Clip Launcher, kept scrolled to activeScene. Deliberately separate from
+        // the main trackBank above, which stays 128-wide for direct scene addressing.
+        final TrackBank indicationBank = host.createMainTrackBank(NUM_TRACKS, 0, 1);
+
         // Push2RecordRow manages Transport.isClipLauncherOverdubEnabled() itself, turning it on
         // only while it actually has a track armed for overdub - not set here as an always-on
         // global flag (Transport.setLauncherOverdub(boolean) throws at runtime if you're
@@ -104,17 +113,24 @@ public class Push2ControllerExtension extends ControllerExtension
         this.recordRow = new Push2RecordRow(host, this.midiOut, trackBank, this.activeScene, transport);
         this.clipLaunchRow = new Push2ClipLaunchRow(this.midiOut, trackBank, this.activeScene, this.recordRow, () -> this.deleteHeld);
         this.stopRow = new Push2StopRow(this.midiOut, trackBank);
+        this.clipJumpRow = new Push2ClipJumpRow(this.midiOut, trackBank, this.activeScene, this.clipLaunchRow);
         this.padRows.add(this.clipLaunchRow);
         this.padRows.add(this.stopRow);
         this.padRows.add(this.recordRow);
+        this.padRows.add(this.clipJumpRow.triggerRow());
+        for (int slotIndex = 0; slotIndex < 4; slotIndex++)
+            this.padRows.add(this.clipJumpRow.slotRow(slotIndex));
         if (this.display != null)
-            this.sessionDisplay = new Push2SessionDisplay(host, this.display, trackBank, this.activeScene);
-        this.sceneButtons = new Push2SceneButtons(this.midiOut, trackBank.sceneBank(), this.activeScene, () -> {
+            this.sessionDisplay = new Push2SessionDisplay(host, this.display, trackBank, this.activeScene, this.playingScene);
+        this.sceneButtons = new Push2SceneButtons(this.midiOut, trackBank, indicationBank, this.activeScene, this.playingScene, () -> {
             this.clipLaunchRow.redrawAll();
             this.recordRow.redrawAll();
+            this.clipJumpRow.redrawAll();
             this.sceneButtons.redraw();
             if (this.sessionDisplay != null)
                 this.sessionDisplay.redraw();
+            if (this.transportPlay != null) // not yet constructed during the first bootstrap call below
+                this.transportPlay.redraw();
         });
         this.sceneButtons.bootstrapWithoutLaunching();
         this.brightness = new Push2Brightness(this.midiOut);
@@ -122,7 +138,7 @@ public class Push2ControllerExtension extends ControllerExtension
         this.midiOut.sendMidi(0xB0, SHIFT_CC, 127); // always lit, visible in the dark - same treatment as Octave Up/Down / Stop All Clips
         this.midiOut.sendMidi(0xB0, DELETE_CC, 127); // same - always lit
 
-        this.transportPlay = new Push2TransportPlay(this.midiOut, transport, this.recordRow);
+        this.transportPlay = new Push2TransportPlay(this.midiOut, this.sceneButtons, this.playingScene);
         this.transportPlay.redraw();
 
         this.running = true;
@@ -198,16 +214,6 @@ public class Push2ControllerExtension extends ControllerExtension
         {
             if (data2 > 0 && this.sceneButtons != null)
                 this.sceneButtons.onStopAllPressed();
-        }
-        else if (command == 0xB0 && (data1 == 46 || data1 == 47)) // Up / Down cursor buttons
-        {
-            if (data2 > 0 && this.sceneButtons != null)
-                this.sceneButtons.onNavigate(data1 == 46 ? -1 : 1);
-        }
-        else if (command == 0xB0 && (data1 == Push2SceneButtons.OCTAVE_DOWN_CC || data1 == Push2SceneButtons.OCTAVE_UP_CC)) // Octave Up/Down buttons - move the scene window
-        {
-            if (data2 > 0 && this.sceneButtons != null)
-                this.sceneButtons.onNavigate(data1 == Push2SceneButtons.OCTAVE_UP_CC ? -1 : 1);
         }
         else if (command == 0xB0 && data1 == Push2Brightness.ENCODER_CC)
         {

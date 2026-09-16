@@ -68,8 +68,8 @@ A/B comparison while testing.
 | Bottom pad row = clip launcher for the active scene | `src/main/java/com/actus/push2/Push2ClipLaunchRow.java` |
 | Row above it = per-track stop (independent of active scene) | `src/main/java/com/actus/push2/Push2StopRow.java` |
 | Row above that = schedule recording/overdub (active scene) | `src/main/java/com/actus/push2/Push2RecordRow.java` |
-| Scene Launch + Stop All Clips + Up/Down buttons (own the active-scene state) | `src/main/java/com/actus/push2/Push2SceneButtons.java` |
-| Transport Play button (finishes recording if any clip is recording, else toggles play) | `src/main/java/com/actus/push2/Push2TransportPlay.java` |
+| Scene Launch + Stop All Clips (owns/syncs the active-scene state) | `src/main/java/com/actus/push2/Push2SceneButtons.java` |
+| Play button (scene-advancing shortcut, not a transport toggle) | `src/main/java/com/actus/push2/Push2TransportPlay.java` |
 | Per-track input-monitoring toggle (buttons below the screen) | `src/main/java/com/actus/push2/Push2MonitorRow.java` |
 | Push 2's 128-color palette + nearest-color matching | `src/main/java/com/actus/push2/Push2Colors.java` |
 | Writes the color palette to the device via SysEx on init | `src/main/java/com/actus/push2/Push2Palette.java` |
@@ -137,6 +137,38 @@ delay (tens to hundreds of ms, picked empirically) is a different tool from a
 bare next-tick defer; use it whenever the requirement is "wait for a
 Bitwig-internal side effect to settle," not just "run after the current call
 stack unwinds."
+
+### Gotcha: `ClipLauncherSlotOrScene`/`ClipLauncherSlotBank.setIndication` is a hard crash
+
+Several `Bank` methods are marked `@Deprecated` since API 17 (confirmed via
+`javap -v`): `SceneBank.scrollTo(int)` and the whole scroll-related family
+(`scrollUp`/`scrollDown`/`scrollPageUp`/`scrollPageDown`/
+`addScrollPositionObserver`/`addCanScrollUpObserver`/etc.), plus
+`ClipLauncherSlotOrScene.setIndication(boolean)` (the per-scene/per-slot
+overload) and `ClipLauncherSlotBank.setIndication(boolean)` (the per-track
+bank overload). These do **not** all fail the same way - tested against
+real Bitwig, not just inferred from the annotation:
+
+- `scrollTo(int)` and friends: compiles with a deprecation warning, runs
+  fine. Still, prefer the non-deprecated replacement where one exists -
+  `Scrollable.scrollPosition()` (a `SettableIntegerValue`, `.set(int)` to
+  move it) - especially for anything called on a hot path (every call
+  re-logs the warning).
+- **`setIndication(boolean)`, both overloads: confirmed to hard-crash the
+  entire script at runtime** (not just log a warning) on this Bitwig
+  version, despite compiling clean and despite DrivenByMoss's own
+  `ClipLauncherNavigatorImpl` calling `SceneBank.setIndication` directly
+  elsewhere (targeting the same API 21 - deprecated-but-crashing isn't
+  necessarily true across every Bitwig build/version, which is exactly why
+  this needs verifying against real Bitwig rather than trusted from
+  reading DBM's source). **Do not call `setIndication` anywhere in this
+  codebase.** For the one place this mattered (the clip-launcher
+  indication frame), the fix wasn't a replacement call at all - the frame
+  is fully driven by `TrackBank.setShouldShowClipLauncherFeedback(boolean)`
+  alone (not deprecated), which is also all DrivenByMoss's own
+  `AbstractTrackBankImpl.setIndication` wrapper does under the hood for
+  every simple single-tier grid controller - no per-item indication needed
+  for a plain whole-bank-window frame. See `Push2SceneButtons`'s class doc.
 
 ### USB (screen, and later pad LEDs)
 
@@ -215,20 +247,24 @@ DrivenByMoss's `SessionMode.updateDisplay2Clips()`/`ClipListComponent` (same
 idea — fill rect + state border + name text per cell — reimplemented against
 our own `GraphicsOutput` rather than DBM's `IGraphicsContext` wrapper).
 
-- **Layout**: 6 rows × 8 columns. Rows run top-to-bottom in ascending scene
-  order, same direction as Bitwig's own Session view sidebar: 2 rows above
-  `activeScene`, then `activeScene` itself (row index 2, marked with a white
-  strip on both the left and right edge), then 2 rows below (`BACK`/
-  `FORWARD` in `Push2SessionDisplay`) — 5 clip rows total (`SCENE_ROWS`).
-  Non-current rows are dimmed (`Push2SessionDisplay.DIM = 0.18`, applied to
-  fill/border/name colors) so the current row stands out — except a clip
-  that's actually playing stays at full brightness regardless of which row
-  it's in, so what's audible right now is always visible at a glance even
-  off the current row. A row whose scene index falls outside
-  `[0, MAX_SCENES)` is left empty, not filled with the active scene
-  repeated. The 6th row (`TRACK_NAME_ROW`, always the bottom-most) isn't a
-  scene row at all — it always shows the 8 tracks' names, centered when
-  they fit, left-aligned and truncated with `...` when they don't, so a
+- **Layout**: 6 rows × 8 columns, but not uniform height. Rows run
+  top-to-bottom in ascending scene order, same direction as Bitwig's own
+  Session view sidebar: `activeScene` itself is always the topmost row
+  (`ACTIVE_ROW = 0`, marked with a white strip on both the left and right
+  edge — nothing is shown above it, by design), then 4 rows below
+  (`FORWARD`) — 5 clip rows total (`SCENE_ROWS`). Only the active row and
+  the bottom track-name row are full height (`Push2SessionDisplay.FULL_H`);
+  the `FORWARD` rows are half that (`HALF_H`) — smaller text (7pt vs 9pt)
+  and a thinner active-state border (3px vs 4px), same states otherwise, to
+  fit all 4 in the same 160px screen height. Non-current rows are dimmed
+  (`Push2SessionDisplay.DIM = 0.18`, applied to fill/border/name colors) so
+  the current row stands out — except a clip that's actually playing stays
+  at full brightness regardless of which row it's in, so what's audible
+  right now is always visible at a glance even off the current row. A row
+  whose scene index falls outside `[0, MAX_SCENES)` is left empty, not
+  filled with the active scene repeated. The bottom row (`TRACK_NAME_ROW`)
+  isn't a scene row at all — it always shows the 8 tracks' names, centered
+  when they fit, left-aligned and truncated with `...` when they don't, so a
   column stays identifiable regardless of which scene is active.
 - **Cell state, two states**: recording/playing/queued are filled solid with
   the clip's color plus a 4px border — red (recording) / white (playing) /
@@ -347,13 +383,21 @@ our own `GraphicsOutput` rather than DBM's `IGraphicsContext` wrapper).
   Clips" button; unrelated to `activeScene`). The remaining 6 are dark. CC
   36 is physically aligned with the bottom pad row (DrivenByMoss layout:
   SCENE1=bottom, SCENE8=top).
-- **Transport Play button** (CC 85, RGB-colored, `Push2TransportPlay`) is
-  overloaded: if `Push2RecordRow.hasArmedTracks()`, pressing Play calls
-  `Push2RecordRow.finishAll()` instead of touching the transport at all.
-  `Push2RecordRow` is the sole source of truth on what's recording, since
-  it's the only thing ever allowed to arm a track. Only when nothing is
-  armed does Play fall back to `Transport.togglePlay()`. Lit green while
-  `Transport.isPlaying()`, dim grey otherwise.
+- **Play button** (CC 85, RGB-colored, `Push2TransportPlay`) is a
+  scene-advancing shortcut, not a transport toggle - deliberately repurposed
+  away from touching the transport or finishing recordings (per explicit
+  user request). Pressing it calls `Push2SceneButtons.onPlayButtonPressed()`
+  (the same class that owns every other `activeScene`/`playingScene`
+  mutation): if nothing is currently playing (`playingScene < 0`), it
+  launches `activeScene` - same as Scene Launch; if a scene is already
+  playing, it launches the next one (`playingScene + 1`, clamped to
+  `MAX_SCENES - 1`) instead - a quick way to step through an arrangement
+  one press at a time. Either way the launched scene is also
+  `selectInEditor()`'d, so `activeScene` and the indication frame follow
+  along via the same sync path a real Bitwig UI click would trigger. Lit
+  green while `playingScene >= 0`, dim grey otherwise - deliberately reads
+  `playingScene`, not raw `Transport.isPlaying()`, since that's the state
+  the button's own logic branches on.
 - **Row of 8 buttons directly below the screen** (CC 20-27, "Lower Row
   1-8" in Ableton's own spec — sits between the screen and the pad grid;
   "Upper Row 1-8", CC 102-109, is the row *above* the screen, not this
@@ -400,7 +444,7 @@ our own `GraphicsOutput` rather than DBM's `IGraphicsContext` wrapper).
   `Push2SceneButtons`, the brightness encoder CC to `Push2Brightness`.
   Don't add a second `setMidiCallback()` call anywhere.
 
-### "Active scene" is controller-local state, not read from Bitwig
+### "Active scene" syncs from Bitwig's own scene selection cursor
 
 Bitwig's Controller API has **no per-scene "is playing" property** — audited
 every method on `Scene`, `SceneBank`, `ClipLauncherSlotOrScene`,
@@ -409,43 +453,59 @@ every method on `Scene`, `SceneBank`, `ClipLauncherSlotOrScene`,
 brighter-button Bitwig's own UI shows when a scene is launched is real,
 internal Bitwig state, not exposed to controller scripts.
 
-Push 2's pads/display do not react when a scene is launched by mouse in
-Bitwig's UI (true of DrivenByMoss's own Scenes mode too) — this is
-controller-local by design. `Push2ControllerExtension.activeScene` (an
-`AtomicInteger`, starts at `-1` = "none yet") changes **only** via our own
-hardware (`Push2SceneButtons.onButtonPressed()`/`onNavigate()`), never
-inferred from clip playback state.
+**Selection is a different story - `Scene.addIsSelectedInEditorObserver()`
+and `Scene.selectInEditor()` do exist** (confirmed via the same `javap`
+audit). `Push2ControllerExtension.activeScene` (an `AtomicInteger`, starts
+at `-1` = "none yet") syncs from this: `Push2SceneButtons`'s constructor
+registers an `isSelectedInEditor` observer on all 128 scenes, and whichever
+one flips true becomes `activeScene` (only the `true` transition is
+handled; a previously-selected scene's observer firing `false` around the
+same time needs no action). Clicking a scene in Bitwig's own Session View
+is what moves the bottom pad row now - there is **no controller-side
+navigation** (an earlier design used Up/Down cursor buttons (CC 46/47) and
+a repurposed Octave Up/Down pair (CC 54/55) for this; both were removed
+once syncing from Bitwig's real selection made them redundant - check git
+history if this ever needs reviving). The two Octave buttons are explicitly
+sent a dark/off color in `Push2SceneButtons.redraw()` rather than left
+showing stale light from before.
 
-Four entry points touch it, all in `Push2SceneButtons`:
+Two entry points touch `activeScene`, both in `Push2SceneButtons`:
 - **`bootstrapWithoutLaunching()`**, called once from
   `Push2ControllerExtension.init()` — sets `activeScene` (if still `-1`) and
   repaints, but deliberately does **not** call `.launch()`. So the bottom
-  row shows the right colors as soon as the project opens, before transport
-  play and before any button press.
+  row shows a reasonable default as soon as the project opens, before
+  Bitwig has reported any real selection and before any button press. In
+  practice the selection-sync above usually supersedes this almost
+  immediately.
 - **Scene Launch** (`LAUNCH_CC`) — launches `activeScene` exactly like
-  clicking that scene's own play button in Bitwig's sidebar. Does not change
-  *which* scene is active by itself (beyond bootstrapping if unset).
-- **Up/Down cursor buttons** (CC 46/47) — moves `activeScene` by one,
-  clamped to `[0, MAX_SCENES-1]`. Navigation only, does not launch.
-- **Octave Up/Down** (CC 55/54, repurposed since Actus has no note/octave
-  transposition feature to give them their usual job) — a second,
-  physically separate pair of buttons calling the same `onNavigate(±1)` as
-  Up/Down. Plain monochrome single-LED buttons (see the white-LED palette
-  gotcha above); `Push2SceneButtons.redraw()` lights both steady at full
-  brightness (127) purely so they're visible in the dark, same
-  "always available" treatment as `STOP_ALL_CC`.
+  clicking that scene's own play button in Bitwig's sidebar. Does not
+  change *which* scene is active by itself (beyond bootstrapping if unset).
 
-(`STOP_ALL_CC` is a fifth button on `Push2SceneButtons` but deliberately
-does *not* touch `activeScene` — it calls `SceneBank.stop()` directly, same
-as `Push2StopRow`'s per-track stop calling `Track.stop()` directly.)
+(`STOP_ALL_CC` is a third button on `Push2SceneButtons`, and it *does* touch
+one piece of scene state — see `playingScene` below — but not `activeScene`;
+it still calls `SceneBank.stop()` directly, same as `Push2StopRow`'s
+per-track stop calling `Track.stop()` directly.)
 
-Any of the four, if `activeScene` is still `-1`, bootstraps it first via
+If `activeScene` is still `-1` when Scene Launch or the extension's own
+startup bootstrap happens, it's set first via
 `Push2SceneButtons.findInitialScene()`: the first scene (0-127) with any
 clips, or scene 0 if the whole project has none.
 
 `activeScene` can hold any value 0-127 (`Push2ControllerExtension.MAX_SCENES`
-— the track bank is created with that many scenes), all reachable via
-Up/Down.
+— the track bank is created with that many scenes).
+
+**`activeScene` (synced from Bitwig's selection) and `playingScene` (what's
+actually launched) are deliberately separate `AtomicInteger`s**, both
+starting at `-1`. Conflating them would mean clicking a different scene in
+Bitwig's UI silently relabeled "what's playing" as wherever the selection
+happened to land, which is wrong - Bitwig itself keeps a scene's
+launched/selected state separate (see the underline/brighter-button note
+above; the *playing* half just isn't exposed to controller scripts, which
+is why `playingScene` is tracked as our own controller-local copy). Only
+two things touch `playingScene`: Scene Launch sets it to `activeScene`'s
+value at the moment of the press; Stop All Clips clears it back to `-1`.
+`Push2SessionDisplay` is the only reader - see its class doc for how it
+marks the two independently on screen.
 
 ### Matrix region ownership (the "multiple modes share the grid" plan)
 
@@ -454,13 +514,36 @@ like DrivenByMoss's — instead different pad ranges get claimed by different
 concurrent features, likely bottom 4 rows for clip/scene management and top 4
 for submode control. Rows 0-2 (notes 36-59) are claimed —
 `Push2ClipLaunchRow` (launch), `Push2StopRow` (stop), `Push2RecordRow`
-(schedule recording) — rows 3-7 are left dark on purpose.
+(schedule recording). Rows 3-7 (notes 60-99) are `Push2ClipJumpRow` — see
+its own section below.
 
 Note-range dispatch is a shared `PadRow` interface (`startNote()` +
 `onPadPressed(column, velocity)`); `Push2ControllerExtension` holds a
 `padRows` list and range-checks against each in `handleMidi()`. A new
 row-consumer just needs to implement `PadRow` and get added to that list —
-no dispatch changes required.
+no dispatch changes required. One consumer can own more than one row —
+`Push2ClipJumpRow` hands back 5 separate `PadRow` instances (one per note
+range) sharing its internal state, rather than the interface itself
+supporting multi-row ranges.
+
+### Per-track "jump ahead" shortcut (`Push2ClipJumpRow`, notes 60-99)
+
+Holding the bottom of these five rows (notes 60-67, the trigger row) for one
+column arms the four rows above it, **for that column only**, as launch
+shortcuts for that track's next four clips relative to `activeScene`: the
+row closest to the trigger fires `activeScene + 1`, the topmost row fires
+`activeScene + 4` (row label N, 1 nearest the trigger up to 4 at the top,
+launches `activeScene + N` — ascending away from the trigger, i.e. straight
+reading order, not the "reverse" 4,3,2,1 of the original request). Releasing
+the trigger clears that column's four pads back to dark; other columns are
+unaffected. Slot pads
+show a **static** preview while held — the target clip's own color if it has
+content, blank/dark if not — deliberately not mirroring live
+recording/playing/queued state the way `Push2ClipLaunchRow` does, reusing
+its cache via two package-private accessors (`hasContent`/`clipColor`)
+rather than observing the slot banks a second time — this is the "third
+consumer" case the session-display note above flags for revisiting a shared
+cache.
 
 ## Record Note Pickup extension (`com.actus.pickup`, unrelated to Push 2)
 
@@ -549,9 +632,11 @@ preemptively.
 
 - Extension registers, MIDI in/out ports 0 are opened, a popup notification
   fires on load/unload. `Push2Palette.write()` runs first thing in `init()`.
-- Push 2's screen shows a 5-clip-row + 1-track-name-row, 8-column session
-  clip grid (`Push2SessionDisplay`) — see the section above for row
-  mapping, cell states, and redraw coalescing. No playback progress bar
+- Push 2's screen shows a 5-clip-row (full-height active + 4 half-height
+  forward, nothing shown before/above activeScene) + 1-track-name-row,
+  8-column session clip grid (`Push2SessionDisplay`) — see the section
+  above for row mapping, cell states, and redraw coalescing. No playback
+  progress bar
   (real API constraint, see above). Kept alive via `flush()` +
   `keepDisplayAlive()`. USB claim wrapped in try/catch so a missing Push 2
   logs via `host.errorln()` instead of breaking the rest of init.
@@ -578,18 +663,35 @@ preemptively.
   pad-grid section above for the full behavior (empty-vs-has-content
   branching, quantized finishing, cancel-vs-restart, exclusive arm
   ownership).
-- Scene Launch button (CC 36) launches/replays `activeScene`; Stop All Clips
-  button (CC 37) calls `SceneBank.stop()`, unrelated to `activeScene`. The
-  other 6 Scene Launch buttons are dark. Up/Down cursor buttons (CC 46/47)
-  and Octave Up/Down buttons (CC 55/54, repurposed, lit steady) both move
-  `activeScene` by one. On project load, `bootstrapWithoutLaunching()`
-  paints the first scene with clips immediately, without auto-launching it.
+- Rows above that (notes 60-99, `Push2ClipJumpRow`) are a per-track
+  "jump ahead" shortcut — hold the bottom row for a column to arm the four
+  rows above it as launch shortcuts for that track's next four clips
+  relative to `activeScene`; see its own section above for the full
+  label/offset mapping and preview behavior.
+- Scene Launch button (CC 36) launches/replays `activeScene` and sets
+  `playingScene` to match; Stop All Clips button (CC 37) calls
+  `SceneBank.stop()` and clears `playingScene` back to `-1` - neither
+  touches `activeScene`. The other 6 Scene Launch buttons are dark.
+  `activeScene` itself is synced from Bitwig's own scene selection
+  (`Scene.isSelectedInEditor()`), not local navigation - there are no
+  Up/Down or Octave Up/Down scene buttons anymore (both removed; the
+  Octave buttons' LEDs are explicitly sent dark). On project load,
+  `bootstrapWithoutLaunching()` paints a reasonable default scene
+  immediately (usually superseded by the real sync almost at once),
+  without auto-launching it (so `playingScene` stays `-1` until an actual
+  launch). The screen marks `activeScene` (white strip) and `playingScene`
+  (green underline) independently - see the "active scene" section above
+  and `Push2SessionDisplay`'s class doc. `Push2SceneButtons` also keeps
+  Bitwig's own "Show Frame in Clip Launcher" indication synced to
+  `activeScene`, one row tall, via a second 1-scene-wide `TrackBank` - see
+  its class doc.
 - Top-left encoder above Tap Tempo (CC 15) controls global pad LED
   brightness 10-100%, default 100%.
-- Transport Play button (CC 85) asks `Push2RecordRow` to finish whatever
-  it has recording/overdubbing instead of touching the transport, when it
-  has anything armed; falls back to normal play/stop toggle otherwise. Lit
-  green while playing, dim grey while stopped.
+- Play button (CC 85) is a scene-advancing shortcut, not a transport
+  toggle: launches `activeScene` if nothing's playing, or the next scene
+  (`playingScene + 1`) if one already is - see the pad-grid section above
+  for the full behavior. Lit green while `playingScene >= 0`, dim grey
+  otherwise.
 - Row of 8 buttons below the screen (CC 20-27) toggles per-track input
   monitoring (`Track.monitorMode()` "OFF"/"ON"), independent of arm state —
   see the pad-grid section above for the exclusive/additive/chord-hold

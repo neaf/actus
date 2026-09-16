@@ -122,6 +122,22 @@ public class Push2ClipLaunchRow implements PadRow
             this.redrawPad(col);
     }
 
+    // Read-only access to this row's per-slot cache for other consumers that need the same
+    // data for a scene other than activeScene (e.g. Push2ClipJumpRow's static next-clips
+    // preview) - see CLAUDE.md's session-display note on revisiting a shared cache once a
+    // third consumer needs it, rather than each one observing the slot banks again
+    // independently.
+
+    boolean hasContent(final int column, final int scene)
+    {
+        return scene >= 0 && scene < MAX_SCENES && this.hasContent[column][scene];
+    }
+
+    int clipColor(final int column, final int scene)
+    {
+        return scene >= 0 && scene < MAX_SCENES ? this.clipColor[column][scene] : COLOR_OFF;
+    }
+
     private void updateState(final boolean [] [] cache, final int column, final int scene, final boolean value)
     {
         if (scene < MAX_SCENES)
