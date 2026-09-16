@@ -23,7 +23,7 @@ public class Push2ControllerExtensionDefinition extends ControllerExtensionDefin
     @Override
     public String getName()
     {
-        return "Actus Push 2";
+        return "Actus Push 2 Controller";
     }
 
     @Override
@@ -47,13 +47,13 @@ public class Push2ControllerExtensionDefinition extends ControllerExtensionDefin
     @Override
     public String getHardwareVendor()
     {
-        return "Ableton";
+        return "Actus";
     }
 
     @Override
     public String getHardwareModel()
     {
-        return "Push 2";
+        return "Push 2 Controller";
     }
 
     @Override

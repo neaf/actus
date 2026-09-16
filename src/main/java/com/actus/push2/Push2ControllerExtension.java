@@ -88,7 +88,10 @@ public class Push2ControllerExtension extends ControllerExtension
             host.errorln("Could not connect to the Push 2 display: " + ex.getMessage());
         }
 
-        final TrackBank trackBank = host.createTrackBank(NUM_TRACKS, 0, MAX_SCENES);
+        // createMainTrackBank (not createTrackBank) excludes effect tracks and the master
+        // track - only audio/instrument/hybrid tracks, which is all this controller launches
+        // clips on or arms for recording.
+        final TrackBank trackBank = host.createMainTrackBank(NUM_TRACKS, 0, MAX_SCENES);
 
         // Push2RecordRow manages Transport.isClipLauncherOverdubEnabled() itself, turning it on
         // only while it actually has a track armed for overdub - not set here as an always-on
@@ -126,8 +129,8 @@ public class Push2ControllerExtension extends ControllerExtension
         if (this.display != null)
             host.scheduleTask(this::keepDisplayAlive, KEEP_ALIVE_INTERVAL_MS);
 
-        host.showPopupNotification("Actus Push 2 initialized");
-        host.println("Actus Push 2: init() complete");
+        host.showPopupNotification("Actus Push 2 Controller initialized");
+        host.println("Actus Push 2 Controller: init() complete");
     }
 
     @Override
@@ -136,7 +139,7 @@ public class Push2ControllerExtension extends ControllerExtension
         this.running = false;
         if (this.display != null)
             this.display.shutdown();
-        this.getHost().showPopupNotification("Actus Push 2 exited");
+        this.getHost().showPopupNotification("Actus Push 2 Controller exited");
     }
 
     @Override

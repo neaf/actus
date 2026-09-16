@@ -8,6 +8,13 @@ A Bitwig Studio controller extension for **Ableton Push 2**, focused solely on
 sequencing, etc.) the way general-purpose frameworks do. When adding a feature,
 ask whether it serves playing live; if not, it's probably out of scope.
 
+This repo also ships a second, unrelated controller extension — **Record
+Note Pickup** (`com.actus.pickup`, see below) — a generic MIDI fix, not a
+Push 2 feature. Same repo/build/license for convenience, but don't read
+"Push 2" scoping above as applying to it. Both extensions are branded under
+one shared "Actus" vendor identity in Bitwig's controller list (not
+"Custom"/"Ableton") since there may be more in the future.
+
 ## Relationship to DrivenByMoss
 
 `~/dev/DrivenByMoss` is Jürgen Moßgraber's multi-controller framework
@@ -75,6 +82,15 @@ Package root is `com.actus.push2` — keep everything under this until there's
 an actual reason to split packages (e.g. `com.actus.push2.view`,
 `.mode`, `.command` once those layers exist, mirroring DrivenByMoss's split
 but only introduced when the code volume justifies it).
+
+`com.actus.pickup` is the separate Record Note Pickup extension (see below) —
+`NotePickupControllerExtensionDefinition.java` /
+`NotePickupControllerExtension.java`, two files, no further split planned.
+Both extensions' SPI entries live in the same
+`META-INF/services/com.bitwig.extension.ExtensionDefinition` file (one line
+each) and ship in the single `Actus.bwextension` jar — Bitwig lists each
+`ExtensionDefinition` in that file as its own selectable controller, so one
+build/one file is enough; no second Maven module needed.
 
 ## Bitwig Extension API basics (v21, learned by inspecting the jar directly —
 there's no bundled source/docs, use `javap -classpath ~/.m2/repository/com/bitwig/extension-api/21/extension-api-21.jar <class>`)
@@ -182,8 +198,13 @@ well to our much simpler screen, so not adopted.
 
 **Naming:** the human-readable name passed as `UsbDeviceMatcher`'s first
 constructor arg is what shows up in Bitwig's Settings → Controllers hardware
-device list. Match DrivenByMoss's convention:
-`getHardwareVendor() + " " + getHardwareModel()` → `"Ableton Push 2"`.
+device list: `getHardwareVendor() + " " + getHardwareModel()` →
+`"Actus Push 2 Controller"`. Both extensions report vendor `"Actus"` (not
+the real hardware maker, e.g. "Ableton") so they group together under one
+"Actus" entry in Bitwig's Add Controller picker instead of scattering across
+"Custom"/per-hardware-vendor buckets - deliberate branding choice, doesn't
+affect the actual USB vendor/product ID matching (that's the raw hex IDs in
+`listHardwareDevices`, untouched by this).
 
 ### Session clip grid on the screen (`Push2SessionDisplay`, adapted from DrivenByMoss)
 
@@ -441,6 +462,89 @@ Note-range dispatch is a shared `PadRow` interface (`startNote()` +
 row-consumer just needs to implement `PadRow` and get added to that list —
 no dispatch changes required.
 
+## Record Note Pickup extension (`com.actus.pickup`, unrelated to Push 2)
+
+Bitwig has no "retrospective record" — a note already held when recording
+starts produces no Note On event, so it's missing from the clip. Fix lives
+in `NotePickupControllerExtension`. User adds it manually in Settings →
+Controllers (no auto-detection/hardware device) and points its MIDI input
+at whatever keyboard — deliberately not tied to Push 2 or one piece of
+hardware ("regardless of what I play" was explicit). `createNoteInput(...)`
++ `setShouldConsumeEvents(false)` passes the keyboard through untouched
+while `handleMidi` also tracks currently-held notes.
+
+Two different fixes, one per recording type:
+
+- **Arranger recording**: live retrigger — resend a fresh Note On via
+  `noteInput.sendRawMidiEvent(...)` the instant `Transport
+  .isArrangerRecordEnabled()` flips true. Not targeted at a specific
+  track — Bitwig's own input routing decides who receives it, same as a
+  real key-press. **Measured on real hardware: lands ~40ms late,
+  invariant across audio buffer sizes (65–2048 samples)** — points at
+  Bitwig's controller-script observer dispatch running on its own
+  fixed-rate poll loop, decoupled from the audio engine, not something
+  script code can close. Accepted (arranger has no queued/stopped signal
+  to do better with).
+- **Clip launcher recording**: writes the note directly into the clip's
+  data via `Clip.setStep(channel, x=0, pitch, velocity, durationBeats)`
+  instead of resending anything audible — `x=0` is always exactly the
+  clip start, duration is a raw beat value not step-quantized, so no
+  flam and no drop-risk (a late `Transport.getPosition()` read is still
+  accurate, just slightly stale). A placeholder
+  (`INITIAL_PLACEHOLDER_BEATS`, 1 beat) is written for every held note
+  the instant recording starts (`startPickup()`), not waited for — that
+  write is what triggers `ClipLauncherSlotBank.showInEditor(scene)` (a
+  deliberate, one-time UI focus switch to the recording clip — this is
+  what resolves the `PinnableCursorClip`-silent-redirect blocker
+  documented above for the session-display progress bar, by giving up on
+  being silent instead) and the `CURSOR_SETTLE_DELAY_MS` (150ms) queueing
+  handshake (Bitwig's cursor-follow isn't guaranteed to have landed by
+  the next script tick). Writing the placeholder immediately rather than
+  waiting for the first real event means later corrections almost always
+  land as fast direct writes instead of racing the settle delay near the
+  end of a take — an earlier "wait until final duration is known" design
+  and an even earlier "wait until recording fully stops, write once"
+  design were both confirmed on real hardware to sometimes/always land
+  too late for the clip's own first playback pass to catch. `setStep`
+  just overwrites the cell, so placeholder → correction behaves like
+  writing the right value from the start, just staged. `finalizeNote()`
+  writes the real duration once known (guarded by
+  `pickupFinalizedPitches`, so only the first caller per pitch wins):
+  released mid-take → immediate, in `handleMidi`; still held →
+  *predicted* via `ClipLauncherSlotBank.addIsStopQueuedObserver`'s
+  advance notice on quantized recording (`schedulePredictiveWrite()`,
+  timed `PREDICTIVE_WRITE_MARGIN_BEATS` — one 1/16 note — before the
+  boundary; firing early only makes a stored note's end slightly off,
+  unlike an abandoned live-retrigger version of this same idea where
+  firing early meant the note was silently dropped — not attempted
+  again); otherwise `finishPickup()` (real recording-stopped transition)
+  is the fallback. `extensionTick()`, a persistent ~1/16-note heartbeat
+  (same pattern as `Push2ControllerExtension.keepDisplayAlive`, started
+  once in `init()`) re-extends any still-unfinalized held note as a
+  safety net for stops with no predictive signal at all (e.g. an abrupt,
+  non-quantized stop).
+
+Automatic and targeted at the exact recording slot — no manual step — and
+additive (`setStep` only touches one cell), so it coexists with everything
+else already recorded. Pickup state is global, not per-slot — only one
+in-flight pickup is tracked at a time, so overlapping quantized recordings
+on different tracks aren't handled precisely.
+
+Two things confirmed by real-hardware testing, worth remembering:
+Bitwig's launch-quantization enum (`Transport.defaultLaunchQuantization()`)
+stores the interval directly as a beat count, not bars — a bare `"1"`
+means 1 beat. And **only one controller script can claim a given MIDI
+input port** — assigning the keyboard's port here removes it from
+tracks' plain "direct MIDI input" choice (tracks select "Actus Record
+Note Pickup" instead, same as Bitwig's own Generic Keyboard script). If
+Push 2 ever gets a pad-based "Note play mode", its notes would arrive
+through a separate `NoteInput` on a separate extension instance, so
+today's pickup logic wouldn't cover it automatically — don't merge the
+two extensions to fix that (Record Note Pickup doesn't need Push 2
+hardware). Instead, extract the pickup logic into a small class
+parameterized by `NoteInput`/track-bank when that day comes, not
+preemptively.
+
 ## Current state (update this section as the project grows)
 
 - Extension registers, MIDI in/out ports 0 are opened, a popup notification
@@ -451,6 +555,14 @@ no dispatch changes required.
   (real API constraint, see above). Kept alive via `flush()` +
   `keepDisplayAlive()`. USB claim wrapped in try/catch so a missing Push 2
   logs via `host.errorln()` instead of breaking the rest of init.
+- Track bank is `host.createMainTrackBank` (audio/instrument/hybrid tracks
+  only — excludes effect tracks and the master track, unlike the plain
+  `createTrackBank` overload). `Push2StopRow` and `Push2RecordRow` both
+  explicitly check `Track.exists()` and go dark for any column past the
+  project's real track count — their underlying state
+  (`isStopped()`/`isQueuedForStop()`, slot content/recording flags) doesn't
+  naturally read as "empty" for a nonexistent track the way clip-launch's
+  and monitor's states do, so those two don't need the same guard.
 - Bottom pad row (notes 36-43) launches/stops clips on tracks 0-7 for
   whichever scene is active. Pad color = clip's real Bitwig color,
   nearest-matched; recording overrides to solid red; playing pulses slowly
@@ -489,6 +601,12 @@ no dispatch changes required.
   top-4-rows submode concept, custom RGB clip colors beyond the fixed
   128-entry palette, playback progress indication (see above — blocked on
   a real API constraint, not just unimplemented).
+- `com.actus.pickup.NotePickupControllerExtension` (unrelated to Push 2 —
+  see its own section above) builds clean; the clip-launcher path's
+  current design (placeholder-then-correct + predictive + heartbeat
+  safety net) has not yet been retested against a real recording session
+  since its last change. Arranger recording's live-retrigger path carries
+  the known ~40ms flam, untouched by any of this.
 
 ## Maintenance note
 
