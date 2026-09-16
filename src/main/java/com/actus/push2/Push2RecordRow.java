@@ -85,6 +85,8 @@ public class Push2RecordRow implements PadRow
     private final AtomicInteger  activeScene;
     private final Transport      transport;
 
+    private final boolean [] exists = new boolean [NUM_TRACKS];
+
     private final boolean [] [] hasContent        = new boolean [NUM_TRACKS] [MAX_SCENES];
     private final boolean [] [] isPlaying         = new boolean [NUM_TRACKS] [MAX_SCENES];
     private final boolean [] [] isRecording       = new boolean [NUM_TRACKS] [MAX_SCENES];
@@ -120,6 +122,14 @@ public class Push2RecordRow implements PadRow
             final int col = t;
             final Track track = trackBank.getItemAt(t);
             this.tracks[t] = track;
+
+            // A bank slot past the end of the track list (fewer real tracks than NUM_TRACKS)
+            // still reports slot/queue state - has to be excluded explicitly or that column
+            // lights up dark red as if it were a real, armable track.
+            track.exists().addValueObserver(value -> {
+                this.exists[col] = value;
+                this.redrawPad(col);
+            });
 
             final ClipLauncherSlotBank slots = track.clipLauncherSlotBank();
             slots.addHasContentObserver((slot, value) -> this.updateState(this.hasContent, col, slot, value));
@@ -160,6 +170,9 @@ public class Push2RecordRow implements PadRow
     public void onPadPressed(final int column, final int velocity)
     {
         if (velocity == 0)
+            return;
+
+        if (!this.exists[column])
             return;
 
         if (this.armedByUs[column])
@@ -330,6 +343,12 @@ public class Push2RecordRow implements PadRow
 
     private void redrawPad(final int column)
     {
+        if (!this.exists[column])
+        {
+            this.sendSteady(column, COLOR_OFF);
+            return;
+        }
+
         final int scene = this.activeScene.get();
         if (scene < 0)
         {

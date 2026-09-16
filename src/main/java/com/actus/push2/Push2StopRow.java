@@ -26,6 +26,7 @@ public class Push2StopRow implements PadRow
     private final MidiOut  midiOut;
     private final Track [] tracks = new Track [NUM_TRACKS];
 
+    private final boolean [] exists       = new boolean [NUM_TRACKS];
     private final boolean [] stopped      = new boolean [NUM_TRACKS];
     private final boolean [] queuedForStop = new boolean [NUM_TRACKS];
 
@@ -38,6 +39,13 @@ public class Push2StopRow implements PadRow
             final int col = t;
             final Track track = trackBank.getItemAt(t);
             this.tracks[t] = track;
+            // A bank slot past the end of the track list (fewer real tracks than NUM_TRACKS)
+            // still reports isStopped()/isQueuedForStop() values - has to be excluded
+            // explicitly or that column lights up as if it were a real, stopped track.
+            track.exists().addValueObserver(value -> {
+                this.exists[col] = value;
+                this.redrawPad(col);
+            });
             track.isStopped().addValueObserver(value -> {
                 this.stopped[col] = value;
                 this.redrawPad(col);
@@ -59,12 +67,18 @@ public class Push2StopRow implements PadRow
     @Override
     public void onPadPressed(final int column, final int velocity)
     {
-        if (velocity > 0)
+        if (velocity > 0 && this.exists[column])
             this.tracks[column].stop();
     }
 
     private void redrawPad(final int column)
     {
+        if (!this.exists[column])
+        {
+            this.sendSteady(column, COLOR_OFF);
+            return;
+        }
+
         if (this.stopped[column])
         {
             this.sendSteady(column, COLOR_OFF);
